@@ -1,0 +1,26 @@
+spring:
+  application:
+    name: spring-ai-demo
+  ai:
+    chat:
+      observations:
+        include-error-logging: true
+        log-prompt: true
+        log-completion: true
+    openai:
+      api-key: "***" # your model api key
+      chat:
+        base-url: "https://ark.cn-beijing.volces.com" # your model endpoint url, use ark endpoint by default
+        completions-path: "/api/v3/chat/completions"
+        options:
+          internal-tool-execution-enabled: true
+    tools:
+      observations:
+        include-content: true # open tool input and output in span
+management:
+  tracing:
+    sampling:
+      probability: 1.0 # sampling probability， 1.0 is 100%
+  observations:
+    annotations:
+      enabled: true
