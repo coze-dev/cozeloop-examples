@@ -52,6 +52,9 @@ func main() {
 	}
 	defer client.Close(ctx)
 
+	ctx, span := cozeloop.StartSpan(ctx, "root", "root")
+	defer span.Finish(ctx)
+
 	// 3. Execute prompt
 	key := "CozeLoop_Oncall_Master"
 	if cozeloopPromptKey != "" {
