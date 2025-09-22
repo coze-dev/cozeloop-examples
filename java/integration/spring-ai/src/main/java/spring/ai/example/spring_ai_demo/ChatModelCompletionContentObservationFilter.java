@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
+// SPDX-License-Identifier: MIT
+
 package spring.ai.example.spring_ai_demo;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
