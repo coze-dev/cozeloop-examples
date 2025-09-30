@@ -1,12 +1,13 @@
 module code.byted.org/flowdevops/cozeloop-examples/go/native
 
-go 1.24.6
+go 1.18
 
 require (
 	github.com/cloudwego/eino v0.5.2
 	github.com/cloudwego/eino-ext/components/model/openai v0.0.0-20250905035413-86dbae6351d5
-	github.com/coze-dev/cozeloop-go v0.1.12
+	github.com/coze-dev/cozeloop-go v0.1.13-0.20250922032637-a0992d63e123
 	github.com/coze-dev/cozeloop-go/spec v0.1.4
+	github.com/getkin/kin-openapi v0.118.0
 )
 
 require (

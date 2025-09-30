@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
+// SPDX-License-Identifier: MIT
+
 package spring.ai.example.spring_ai_demo;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -8,7 +11,7 @@ import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationFilter;
 import org.springframework.ai.chat.observation.ChatModelObservationContext;
 import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.stereotype.Component;
 
@@ -152,7 +155,7 @@ public class ChatModelCompletionContentObservationFilter implements ObservationF
             result.put("messages", messages);
 
             List<Map<String, Object>> tools = new ArrayList<>();
-            if (request.getOptions() instanceof OpenAiChatOptions toolCallingChatOptions) {
+            if (request.getOptions() instanceof ToolCallingChatOptions toolCallingChatOptions) {
                 List<ToolCallback> toolCallbacks = toolCallingChatOptions.getToolCallbacks();
                 for (ToolCallback toolCallback : toolCallbacks) {
                     Map<String, Object> tool = new HashMap<>();

@@ -18,3 +18,5 @@
 go.work
 
 .idea/
+pkg/
+java/integration/spring-ai-example/
