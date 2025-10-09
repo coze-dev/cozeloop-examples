@@ -1,2 +1,0 @@
-- multi agent examples: https://github.com/cloudwego/eino-examples/blob/main/flow/agent/multiagent/plan_execute/main.go
-- other examples: https://github.com/cloudwego/eino-examples
