@@ -72,31 +72,35 @@ def get_current_time(city: str) -> dict:
     return {"status": "success", "report": report}
 
 
-agent = Agent(
-    name="weather_time_agent",
-    model="gemini-2.0-flash",
-    description=(
-        "Agent to answer questions about the time and weather in a city."
-    ),
-    instruction=(
-        "You are a helpful agent who can answer user questions about the time and weather in a city."
-    ),
-    tools=[get_weather, get_current_time],
-)
-
-APP_NAME = "weather_time_app"
-USER_ID = "demo-user"
-SESSION_ID = "demo-session"
-
-session_service = InMemorySessionService()
-
 async def main():
-    await session_service.create_session(app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID)
-    runner = Runner(agent=agent, app_name=APP_NAME, session_service=session_service)
-    user_msg = types.Content(role="user", parts=[types.Part(text="What is the weather in New York?")])
-    for event in runner.run(user_id=USER_ID, session_id=SESSION_ID, new_message=user_msg):
-        if event.is_final_response():
-            print(event.content.parts[0].text)
+    # set custom span
+    with tracer.start_as_current_span("root_span") as span:
+        span.set_attribute("cozeloop.span_type", "custom")
+
+        agent = Agent(
+            name="weather_time_agent",
+            model="gemini-2.0-flash",
+            description=(
+                "Agent to answer questions about the time and weather in a city."
+            ),
+            instruction=(
+                "You are a helpful agent who can answer user questions about the time and weather in a city."
+            ),
+            tools=[get_weather, get_current_time],
+        )
+
+        APP_NAME = "weather_time_app"
+        USER_ID = "demo-user"
+        SESSION_ID = "demo-session"
+
+        # start ADK workflow
+        session_service = InMemorySessionService()
+        runner = Runner(agent=agent, app_name=APP_NAME, session_service=session_service)
+        await session_service.create_session(app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID)
+        user_msg = types.Content(role="user", parts=[types.Part(text="What is the weather in New York?")])
+        async for event in runner.run_async(user_id=USER_ID, session_id=SESSION_ID, new_message=user_msg):
+            if event.is_final_response():
+                print(event.content.parts[0].text)
 
 
 if __name__ == "__main__":
