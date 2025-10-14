@@ -2,13 +2,11 @@
 
 # Set global environment variable
 - MODEL_AGENT_API_KEY=***
+- OBSERVABILITY_OPENTELEMETRY_COZELOOP_SERVICE_NAME=***
+- OBSERVABILITY_OPENTELEMETRY_COZELOOP_API_KEY=***
 
-use ark model api key, refer: https://www.volcengine.com/docs/82379/1361424
+MODEL_AGENT_API_KEY is ark model api key, refer: https://www.volcengine.com/docs/82379/1361424
 
-# Set CozeloopExporterConfig in CozeloopExporter
-- space_id="***""
-- token="***"
+OBSERVABILITY_OPENTELEMETRY_COZELOOP_SERVICE_NAME is work_space_id in cozeloop, from https://loop.coze.cn/
 
-space_id is work_space_id in cozeloop, from https://loop.coze.cn/
-
-token is pat token or sat token, which has trace upload permission for this spaceID, like pat_*** or sat_***, reference doc: https://loop.coze.cn/open/docs/cozeloop/authentication-for-sdk
+OBSERVABILITY_OPENTELEMETRY_COZELOOP_API_KEY is pat token or sat token, which has trace upload permission for this spaceID, like pat_*** or sat_***, reference doc: https://loop.coze.cn/open/docs/cozeloop/authentication-for-sdk

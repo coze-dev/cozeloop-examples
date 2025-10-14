@@ -1,6 +1,10 @@
 import os
 import asyncio
 
+os.environ["MODEL_AGENT_API_KEY"] = "***"
+os.environ["OBSERVABILITY_OPENTELEMETRY_COZELOOP_SERVICE_NAME"] = "***"
+os.environ["OBSERVABILITY_OPENTELEMETRY_COZELOOP_API_KEY"] = "***"
+
 from veadk import Agent, Runner
 from veadk.memory.short_term_memory import ShortTermMemory
 from veadk.tools.demo_tools import get_city_weather
@@ -8,13 +12,9 @@ from veadk.tracing.telemetry.exporters.cozeloop_exporter import CozeloopExporter
 from veadk.tracing.telemetry.opentelemetry_tracer import OpentelemetryTracer
 from opentelemetry import trace
 
-os.environ["MODEL_AGENT_API_KEY"] = "***"  # use ark model api key, refer: https://www.volcengine.com/docs/82379/1361424
 
 exporters = [CozeloopExporter(
-    config=CozeloopExporterConfig(
-        space_id="***",
-        token="***",
-    )
+    config=CozeloopExporterConfig()
 )]
 tracer = OpentelemetryTracer(exporters=exporters)  # init veadk opentelemetry tracer
 otel_raw_tracer = trace.get_tracer_provider().get_tracer(__name__)  # get global opentelemetry tracer for custom span
