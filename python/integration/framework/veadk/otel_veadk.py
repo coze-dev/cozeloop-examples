@@ -13,9 +13,7 @@ from veadk.tracing.telemetry.opentelemetry_tracer import OpentelemetryTracer
 from opentelemetry import trace
 
 
-exporters = [CozeloopExporter(
-    config=CozeloopExporterConfig()
-)]
+exporters = [CozeloopExporter()]
 tracer = OpentelemetryTracer(exporters=exporters)  # init veadk opentelemetry tracer
 otel_raw_tracer = trace.get_tracer_provider().get_tracer(__name__)  # get global opentelemetry tracer for custom span
 
