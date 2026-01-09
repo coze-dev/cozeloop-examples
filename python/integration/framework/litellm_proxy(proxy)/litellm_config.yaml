@@ -1,0 +1,9 @@
+model_list:
+  - model_name: my-gpt-model
+    litellm_params:
+      model: azure/gpt-5-2025-08-07
+      api_base: <azure-api-endpoint>
+      api_key: <azure-api-key>
+
+litellm_settings:
+  callbacks: ["otel"]
