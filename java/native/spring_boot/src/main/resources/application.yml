@@ -1,0 +1,5 @@
+cozeloop:
+  workspace-id: 7******
+  service-name: spring-boot-example
+  auth:
+    token: pat_****
