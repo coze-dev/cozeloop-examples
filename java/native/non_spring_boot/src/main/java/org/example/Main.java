@@ -45,10 +45,9 @@ public class Main {
 
     // 2. 初始化 CozeLoopClient
     // 在非 Spring Boot 环境中，我们需要手动通过 Builder 构建客户端
+    // workspaceId 和 apiToken 会自动从env获取，如果已设置则无需传入
     try (CozeLoopClient client =
         new CozeLoopClientBuilder()
-            .workspaceId(workspaceId)
-            .tokenAuth(apiToken)
             .serviceName("non-spring-boot-example")
             .build()) {
 
