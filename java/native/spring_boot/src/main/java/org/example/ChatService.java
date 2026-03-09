@@ -36,8 +36,8 @@ public class ChatService {
     @CozeTrace(
             name = "combined_chat_process",
             spanType = "business",
-            captureArgs = true,
-            captureReturn=true
+            captureArgs = true, // true by default
+            captureReturn=true  // true by default
     )
     public String chat(String promptKey, String query) {
         log.info("Starting combined process for query: {}", query);
