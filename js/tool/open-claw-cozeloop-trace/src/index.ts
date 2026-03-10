@@ -2,7 +2,7 @@ import type {
   OpenClawPlugin,
   OpenClawPluginApi,
   PluginHookContext,
-  FornaxTraceConfig,
+  CozeloopTraceConfig,
   LlmInputEvent,
   LlmOutputEvent,
   BeforeToolCallEvent,
@@ -18,7 +18,7 @@ import type {
   MessageSentEvent,
   SpanData,
 } from "./types.js";
-import { FornaxExporter } from "./fornax-exporter.js";
+import { CozeloopExporter } from "./cozeloop-exporter.js";
 
 function generateId(length = 16): string {
   const chars = "0123456789abcdef";
@@ -106,53 +106,29 @@ interface PendingToolCall {
 }
 let pendingToolCall: PendingToolCall | undefined;
 
-const fornaxTracePlugin: OpenClawPlugin = {
-  id: "openclaw-fornax-trace",
-  name: "OpenClaw Fornax Trace",
+const cozeloopTracePlugin: OpenClawPlugin = {
+  id: "openclaw-cozeloop-trace",
+  name: "OpenClaw CozeLoop Trace",
   version: "0.1.0",
-  description: "Report OpenClaw execution traces to Fornax via OpenTelemetry",
+  description: "Report OpenClaw execution traces to CozeLoop via OpenTelemetry",
 
   activate(api: OpenClawPluginApi) {
     const pluginConfig = api.pluginConfig || {};
-    
-    const ak = pluginConfig.ak as string | undefined;
-    const sk = pluginConfig.sk as string | undefined;
+
     const authorization = pluginConfig.authorization as string | undefined;
     const workspaceId = pluginConfig.workspaceId as string | undefined;
-    
-    const hasAkSk = ak && sk;
-    const hasAuthWorkspace = authorization && workspaceId;
-    
-    if (!hasAkSk && !hasAuthWorkspace) {
+
+    if (!authorization || !workspaceId) {
       api.logger.error(
-        "[FornaxTrace] Missing required configuration: either 'ak'+'sk' or 'authorization'+'workspaceId' must be provided"
+        "[CozeloopTrace] Missing required configuration: 'authorization' and 'workspaceId' must be provided"
       );
       return;
     }
 
-    const region = (pluginConfig.region as FornaxTraceConfig['region']) || "CN";
-    
-    const getDefaultEndpoint = (r: FornaxTraceConfig['region']): string => {
-      switch (r) {
-        case "I18N":
-          return "https://fornax.byteintl.net/open-api/observability/opentelemetry";
-        case "I18N_VA":
-          return "https://fornax-va.byteintl.net/open-api/observability/opentelemetry";
-        case "NON_TT":
-          return "https://fornax-i18nbd.byteintl.net/open-api/observability/opentelemetry";
-        case "CN":
-        default:
-          return "https://fornax.bytedance.net/open-api/observability/opentelemetry";
-      }
-    };
-
-    const config: FornaxTraceConfig = {
-      endpoint: (pluginConfig.endpoint as string) || getDefaultEndpoint(region),
-      ak,
-      sk,
-      region,
+    const config: CozeloopTraceConfig = {
+      endpoint: (pluginConfig.endpoint as string) || "https://api.coze.cn/v1/loop/opentelemetry",
       authorization,
-      workspaceId: workspaceId || "",
+      workspaceId,
       serviceName: (pluginConfig.serviceName as string) || "openclaw-agent",
       debug: (pluginConfig.debug as boolean) || false,
       batchSize: (pluginConfig.batchSize as number) || 10,
@@ -160,7 +136,7 @@ const fornaxTracePlugin: OpenClawPlugin = {
       enabledHooks: pluginConfig.enabledHooks as string[] | undefined,
     };
 
-    const exporter = new FornaxExporter(api, config);
+    const exporter = new CozeloopExporter(api, config);
     const contextByChannelId = new Map<string, TraceContext>();
     const contextByRunId = new Map<string, TraceContext>();
 
@@ -228,7 +204,7 @@ const fornaxTracePlugin: OpenClawPlugin = {
         contextByChannelId.set(rawChannelId, activeCtx);
         contextByRunId.set(effectiveRunId, activeCtx);
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] LINKING agent to user context: hook=${hookName}, agentChannel=${rawChannelId}, userChannel=${channelId}, traceId=${activeCtx.traceId}`);
+          api.logger.info(`[CozeloopTrace] LINKING agent to user context: hook=${hookName}, agentChannel=${rawChannelId}, userChannel=${channelId}, traceId=${activeCtx.traceId}`);
         }
       }
 
@@ -237,10 +213,10 @@ const fornaxTracePlugin: OpenClawPlugin = {
         activeCtx = startTurn(effectiveRunId, channelId, rawChannelId !== channelId ? rawChannelId : undefined);
         isNew = true;
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] NEW TraceContext created: hook=${hookName}, channelId=${channelId}, runId=${effectiveRunId}, traceId=${activeCtx.traceId}`);
+          api.logger.info(`[CozeloopTrace] NEW TraceContext created: hook=${hookName}, channelId=${channelId}, runId=${effectiveRunId}, traceId=${activeCtx.traceId}`);
         }
       } else if (config.debug) {
-        api.logger.info(`[FornaxTrace] REUSING TraceContext: hook=${hookName}, channelId=${channelId}, runId=${effectiveRunId}, traceId=${activeCtx.traceId}`);
+        api.logger.info(`[CozeloopTrace] REUSING TraceContext: hook=${hookName}, channelId=${channelId}, runId=${effectiveRunId}, traceId=${activeCtx.traceId}`);
       }
 
       return { ctx: activeCtx, channelId, isNew };
@@ -299,7 +275,7 @@ const fornaxTracePlugin: OpenClawPlugin = {
         );
         await exporter.export(span);
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] Exported gateway_start span, traceId=${ctx.traceId}`);
+          api.logger.info(`[CozeloopTrace] Exported gateway_start span, traceId=${ctx.traceId}`);
         }
       });
     }
@@ -308,7 +284,7 @@ const fornaxTracePlugin: OpenClawPlugin = {
       api.on<SessionStartEvent>("session_start", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx, event.sessionId);
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] session_start hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}`);
+          api.logger.info(`[CozeloopTrace] session_start hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}`);
         }
         const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "session_start");
         const now = Date.now();
@@ -323,7 +299,7 @@ const fornaxTracePlugin: OpenClawPlugin = {
         );
         await exporter.export(span);
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] Exported session_start: ${channelId}, traceId=${ctx.traceId}`);
+          api.logger.info(`[CozeloopTrace] Exported session_start: ${channelId}, traceId=${ctx.traceId}`);
         }
       });
     }
@@ -332,7 +308,7 @@ const fornaxTracePlugin: OpenClawPlugin = {
       api.on<SessionEndEvent>("session_end", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx, event.sessionId);
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] session_end hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}`);
+          api.logger.info(`[CozeloopTrace] session_end hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}`);
         }
         const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "session_end");
         const now = Date.now();
@@ -354,7 +330,7 @@ const fornaxTracePlugin: OpenClawPlugin = {
         await exporter.export(span);
         endTurn(channelId);
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] Exported session_end: ${channelId}`);
+          api.logger.info(`[CozeloopTrace] Exported session_end: ${channelId}`);
         }
       });
     }
@@ -363,7 +339,7 @@ const fornaxTracePlugin: OpenClawPlugin = {
       api.on<MessageReceivedEvent>("message_received", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx, event.from || event.metadata?.senderId);
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] message_received hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}, event.from=${event.from}`);
+          api.logger.info(`[CozeloopTrace] message_received hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}, event.from=${event.from}`);
         }
         const { ctx, channelId, isNew } = getOrCreateContext(rawChannelId, undefined, "message_received");
         const now = Date.now();
@@ -371,15 +347,15 @@ const fornaxTracePlugin: OpenClawPlugin = {
         if (!role && event.from) {
           role = "user";
         }
-        
+
         if (role === "user" && !rawChannelId.startsWith("agent/")) {
           lastUserChannelId = channelId;
           lastUserTraceContext = ctx;
           ctx.userInput = event.content;
           if (config.debug) {
-            api.logger.info(`[FornaxTrace] Saved user context: channelId=${channelId}, traceId=${ctx.traceId}`);
+            api.logger.info(`[CozeloopTrace] Saved user context: channelId=${channelId}, traceId=${ctx.traceId}`);
           }
-          
+
           if (isNew) {
             ctx.rootSpanStartTime = now;
             const rootSpanData: SpanData = {
@@ -397,11 +373,11 @@ const fornaxTracePlugin: OpenClawPlugin = {
             };
             exporter.startSpan(rootSpanData, ctx.rootSpanId);
             if (config.debug) {
-              api.logger.info(`[FornaxTrace] Started root span: traceId=${ctx.traceId}, spanId=${ctx.rootSpanId}`);
+              api.logger.info(`[CozeloopTrace] Started root span: traceId=${ctx.traceId}, spanId=${ctx.rootSpanId}`);
             }
           }
         }
-        
+
         const span = createSpan(
           ctx,
           channelId,
@@ -417,7 +393,7 @@ const fornaxTracePlugin: OpenClawPlugin = {
         );
         await exporter.export(span);
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] Exported message_received: ${channelId}, role=${role}, traceId=${ctx.traceId}`);
+          api.logger.info(`[CozeloopTrace] Exported message_received: ${channelId}, role=${role}, traceId=${ctx.traceId}`);
         }
       });
     }
@@ -427,14 +403,14 @@ const fornaxTracePlugin: OpenClawPlugin = {
         if (lastUserTraceContext) {
           lastUserTraceContext.lastOutput = event.content;
           if (config.debug) {
-            api.logger.info(`[FornaxTrace] Captured output for root span: traceId=${lastUserTraceContext.traceId}, content=${typeof event.content === 'string' ? event.content.substring(0, 100) : 'non-string'}`);
+            api.logger.info(`[CozeloopTrace] Captured output for root span: traceId=${lastUserTraceContext.traceId}, content=${typeof event.content === 'string' ? event.content.substring(0, 100) : 'non-string'}`);
           }
         } else {
           const rawChannelId = resolveChannelId(hookCtx, event.to);
           const { ctx } = getOrCreateContext(rawChannelId, undefined, "message_sending");
           ctx.lastOutput = event.content;
           if (config.debug) {
-            api.logger.info(`[FornaxTrace] Captured output (fallback) for root span: traceId=${ctx.traceId}`);
+            api.logger.info(`[CozeloopTrace] Captured output (fallback) for root span: traceId=${ctx.traceId}`);
           }
         }
       });
@@ -446,14 +422,14 @@ const fornaxTracePlugin: OpenClawPlugin = {
           if (lastUserTraceContext) {
             lastUserTraceContext.lastOutput = event.content;
             if (config.debug) {
-              api.logger.info(`[FornaxTrace] Captured output from message_sent: traceId=${lastUserTraceContext.traceId}`);
+              api.logger.info(`[CozeloopTrace] Captured output from message_sent: traceId=${lastUserTraceContext.traceId}`);
             }
           } else {
             const rawChannelId = resolveChannelId(hookCtx, event.to);
             const { ctx } = getOrCreateContext(rawChannelId, undefined, "message_sent");
             ctx.lastOutput = event.content;
             if (config.debug) {
-              api.logger.info(`[FornaxTrace] Captured output from message_sent (fallback): traceId=${ctx.traceId}`);
+              api.logger.info(`[CozeloopTrace] Captured output from message_sent (fallback): traceId=${ctx.traceId}`);
             }
           }
         }
@@ -463,17 +439,17 @@ const fornaxTracePlugin: OpenClawPlugin = {
     let lastLlmInput: unknown = undefined;
     let lastLlmStartTime: number | undefined = undefined;
     let lastLlmSpanId: string | undefined = undefined;
-    
+
     if (shouldHookEnabled("llm_input")) {
       api.on<LlmInputEvent>("llm_input", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx);
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] llm_input hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}, event.runId=${event.runId}`);
+          api.logger.info(`[CozeloopTrace] llm_input hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}, event.runId=${event.runId}`);
         }
         const { ctx } = getOrCreateContext(rawChannelId, event.runId, "llm_input");
         ctx.llmStartTime = Date.now();
         ctx.llmSpanId = generateId(16);
-        
+
         const messages: Array<{ role: string; content: unknown }> = [];
         if (event.systemPrompt) {
           messages.push({ role: "system", content: event.systemPrompt });
@@ -510,35 +486,35 @@ const fornaxTracePlugin: OpenClawPlugin = {
         for (const message of messages as unknown as Array<Record<string, unknown>>) {
           convertToolCallDeepInPlace(message);
         }
-        
+
         ctx.llmInput = {
           "messages": messages,
         };
         lastLlmInput = ctx.llmInput;
         lastLlmStartTime = ctx.llmStartTime;
         lastLlmSpanId = ctx.llmSpanId;
-        
+
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] LLM input started: ${event.provider}/${event.model}, runId=${event.runId}, traceId=${ctx.traceId}`);
+          api.logger.info(`[CozeloopTrace] LLM input started: ${event.provider}/${event.model}, runId=${event.runId}, traceId=${ctx.traceId}`);
         }
       });
     }
-    
+
     if (shouldHookEnabled("llm_output")) {
       api.on<LlmOutputEvent>("llm_output", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx);
         if (config.debug) {
           // DEBUG: dump full event to diagnose token fields
-          api.logger.info(`[FornaxTrace][DEBUG] llm_output event.usage=${JSON.stringify(event.usage)}`);
-          api.logger.info(`[FornaxTrace][DEBUG] llm_output event.lastAssistant=${JSON.stringify(event.lastAssistant)}`);
-          api.logger.info(`[FornaxTrace][DEBUG] llm_output event keys=${JSON.stringify(Object.keys(event as unknown as object))}`);
+          api.logger.info(`[CozeloopTrace][DEBUG] llm_output event.usage=${JSON.stringify(event.usage)}`);
+          api.logger.info(`[CozeloopTrace][DEBUG] llm_output event.lastAssistant=${JSON.stringify(event.lastAssistant)}`);
+          api.logger.info(`[CozeloopTrace][DEBUG] llm_output event keys=${JSON.stringify(Object.keys(event as unknown as object))}`);
 
-          api.logger.info(`[FornaxTrace] llm_output hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}, event.runId=${event.runId}`);
+          api.logger.info(`[CozeloopTrace] llm_output hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}, event.runId=${event.runId}`);
         }
         const { ctx, channelId } = getOrCreateContext(rawChannelId, event.runId, "llm_output");
         const now = Date.now();
         const startTime = ctx.llmStartTime || lastLlmStartTime || now;
-        
+
         if (event.assistantTexts && event.assistantTexts.length > 0) {
           const outputText = event.assistantTexts.join("\n");
           ctx.lastOutput = outputText;
@@ -546,15 +522,15 @@ const fornaxTracePlugin: OpenClawPlugin = {
             lastUserTraceContext.lastOutput = outputText;
           }
           if (config.debug) {
-            api.logger.info(`[FornaxTrace] Captured output from llm_output (will use last): traceId=${ctx.traceId}, length=${outputText.length}`);
+            api.logger.info(`[CozeloopTrace] Captured output from llm_output (will use last): traceId=${ctx.traceId}, length=${outputText.length}`);
           }
         }
-        
+
         const llmInput = ctx.llmInput || lastLlmInput;
         const llmSpanId = ctx.llmSpanId || lastLlmSpanId;
 
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] llm_output ctx: traceId=${ctx.traceId}, rootSpanId=${ctx.rootSpanId}, llmSpanId=${llmSpanId || "none"}, hasInput=${!!llmInput}`);
+          api.logger.info(`[CozeloopTrace] llm_output ctx: traceId=${ctx.traceId}, rootSpanId=${ctx.rootSpanId}, llmSpanId=${llmSpanId || "none"}, hasInput=${!!llmInput}`);
         }
 
         // event.usage comes from getUsageTotals() which may be undefined when the
@@ -581,7 +557,7 @@ const fornaxTracePlugin: OpenClawPlugin = {
           llmInput,
           { assistantTexts: event.assistantTexts?.slice(0, 3) }
         );
-        
+
         if (llmSpanId) {
           span.spanId = llmSpanId;
         }
@@ -591,14 +567,14 @@ const fornaxTracePlugin: OpenClawPlugin = {
         lastLlmInput = undefined;
         lastLlmStartTime = undefined;
         lastLlmSpanId = undefined;
-        
+
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] llm_output span created: spanId=${span.spanId}, parentSpanId=${span.parentSpanId}`);
+          api.logger.info(`[CozeloopTrace] llm_output span created: spanId=${span.spanId}, parentSpanId=${span.parentSpanId}`);
         }
-        
+
         await exporter.export(span);
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] Exported LLM span: ${event.provider}/${event.model}, duration=${now - startTime}ms, traceId=${ctx.traceId}`);
+          api.logger.info(`[CozeloopTrace] Exported LLM span: ${event.provider}/${event.model}, duration=${now - startTime}ms, traceId=${ctx.traceId}`);
         }
       });
     }
@@ -607,10 +583,10 @@ const fornaxTracePlugin: OpenClawPlugin = {
       api.on<BeforeToolCallEvent>("before_tool_call", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx);
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] before_tool_call hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}, toolName=${event.toolName}`);
+          api.logger.info(`[CozeloopTrace] before_tool_call hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}, toolName=${event.toolName}`);
         }
         const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "before_tool_call");
-        
+
         pendingToolCall = {
           toolName: event.toolName,
           toolSpanId: generateId(16),
@@ -619,9 +595,9 @@ const fornaxTracePlugin: OpenClawPlugin = {
           traceContext: ctx,
           channelId: channelId,
         };
-        
+
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] Tool call started: ${event.toolName}, spanId=${pendingToolCall.toolSpanId}, traceId=${ctx.traceId}`);
+          api.logger.info(`[CozeloopTrace] Tool call started: ${event.toolName}, spanId=${pendingToolCall.toolSpanId}, traceId=${ctx.traceId}`);
         }
       });
     }
@@ -629,21 +605,21 @@ const fornaxTracePlugin: OpenClawPlugin = {
     if (shouldHookEnabled("after_tool_call")) {
       api.on<AfterToolCallEvent>("after_tool_call", async (event, hookCtx: PluginHookContext) => {
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] after_tool_call hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}, toolName=${event.toolName}`);
+          api.logger.info(`[CozeloopTrace] after_tool_call hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}, toolName=${event.toolName}`);
         }
-        
+
         if (!pendingToolCall || pendingToolCall.toolName !== event.toolName) {
           if (config.debug) {
-            api.logger.info(`[FornaxTrace] Skipping after_tool_call: no pending tool or name mismatch, toolName=${event.toolName}, pending=${pendingToolCall?.toolName}`);
+            api.logger.info(`[CozeloopTrace] Skipping after_tool_call: no pending tool or name mismatch, toolName=${event.toolName}, pending=${pendingToolCall?.toolName}`);
           }
           return;
         }
-        
+
         const { toolName, toolSpanId, toolStartTime, toolInput, traceContext, channelId } = pendingToolCall;
         pendingToolCall = undefined;
-        
+
         const now = Date.now();
-        
+
         const span = createSpan(
           traceContext,
           channelId,
@@ -659,12 +635,12 @@ const fornaxTracePlugin: OpenClawPlugin = {
           toolInput,
           event.error ? { error: event.error } : event.result
         );
-        
+
         span.spanId = toolSpanId;
-        
+
         await exporter.export(span);
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] Exported tool span: ${toolName}, spanId=${toolSpanId}, duration=${now - toolStartTime}ms, traceId=${traceContext.traceId}`);
+          api.logger.info(`[CozeloopTrace] Exported tool span: ${toolName}, spanId=${toolSpanId}, duration=${now - toolStartTime}ms, traceId=${traceContext.traceId}`);
         }
       });
     }
@@ -674,21 +650,21 @@ const fornaxTracePlugin: OpenClawPlugin = {
         const rawChannelId = resolveChannelId(hookCtx);
         const agentId = hookCtx.agentId || event.agentId || "main";
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] before_agent_start hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId, agentId: hookCtx.agentId})}, event.agentId=${event.agentId}`);
+          api.logger.info(`[CozeloopTrace] before_agent_start hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId, agentId: hookCtx.agentId})}, event.agentId=${event.agentId}`);
         }
         const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "before_agent_start");
-        
+
         if (ctx.agentSpanId) {
           if (config.debug) {
-            api.logger.info(`[FornaxTrace] Agent span already started, skipping: ${agentId}, traceId=${ctx.traceId}`);
+            api.logger.info(`[CozeloopTrace] Agent span already started, skipping: ${agentId}, traceId=${ctx.traceId}`);
           }
           return;
         }
-        
+
         const now = Date.now();
         ctx.agentStartTime = now;
         ctx.agentSpanId = generateId(16);
-        
+
         const spanData: SpanData = {
           name: agentId,
           type: "agent",
@@ -703,11 +679,11 @@ const fornaxTracePlugin: OpenClawPlugin = {
           spanId: ctx.agentSpanId,
           parentSpanId: ctx.rootSpanId,
         };
-        
+
         exporter.startSpan(spanData, ctx.agentSpanId);
-        
+
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] Started agent span: ${agentId}, spanId=${ctx.agentSpanId}, traceId=${ctx.traceId}`);
+          api.logger.info(`[CozeloopTrace] Started agent span: ${agentId}, spanId=${ctx.agentSpanId}, traceId=${ctx.traceId}`);
         }
       });
     }
@@ -716,11 +692,11 @@ const fornaxTracePlugin: OpenClawPlugin = {
       api.on<AgentEndEvent>("agent_end", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx);
         if (config.debug) {
-          api.logger.info(`[FornaxTrace] agent_end hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}`);
+          api.logger.info(`[CozeloopTrace] agent_end hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}`);
         }
         const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "agent_end");
         const now = Date.now();
-        
+
         if (ctx.agentSpanId) {
           exporter.endSpanById(
             ctx.agentSpanId,
@@ -733,15 +709,15 @@ const fornaxTracePlugin: OpenClawPlugin = {
             },
             { usage: event.usage, cost: event.cost }
           );
-          
+
           if (config.debug) {
-            api.logger.info(`[FornaxTrace] Ended agent span: spanId=${ctx.agentSpanId}, duration=${event.durationMs}ms, traceId=${ctx.traceId}`);
+            api.logger.info(`[CozeloopTrace] Ended agent span: spanId=${ctx.agentSpanId}, duration=${event.durationMs}ms, traceId=${ctx.traceId}`);
           }
-          
+
           ctx.agentSpanId = undefined;
           ctx.agentStartTime = undefined;
         }
-        
+
         const savedLastUserTraceContext = lastUserTraceContext;
         if (savedLastUserTraceContext) {
           savedLastUserTraceContext.lastOutput = undefined;
@@ -756,7 +732,7 @@ const fornaxTracePlugin: OpenClawPlugin = {
         if (originalChannelId && originalChannelId !== savedLastUserChannelId) {
           endTurn(originalChannelId);
         }
-        
+
         const rootCtx = savedLastUserTraceContext || ctx;
         const agentChannelId = channelId;
         if (rootCtx.rootSpanStartTime) {
@@ -764,12 +740,12 @@ const fornaxTracePlugin: OpenClawPlugin = {
           const rootSpanStartTime = rootCtx.rootSpanStartTime;
           const userInput = rootCtx.userInput;
           const traceId = rootCtx.traceId;
-          
+
           setTimeout(async () => {
             const agentCtx = getContextByChannel(agentChannelId);
             const finalOutput = agentCtx?.lastOutput || rootCtx.lastOutput;
             if (config.debug) {
-              api.logger.info(`[FornaxTrace] Ending root span (delayed) with input=${userInput ? 'present' : 'missing'}, output=${finalOutput ? 'present' : 'missing'}`);
+              api.logger.info(`[CozeloopTrace] Ending root span (delayed) with input=${userInput ? 'present' : 'missing'}, output=${finalOutput ? 'present' : 'missing'}`);
             }
             const endTime = Date.now();
             exporter.endSpanById(
@@ -781,11 +757,11 @@ const fornaxTracePlugin: OpenClawPlugin = {
               finalOutput,
               userInput
             );
-            
+
             if (config.debug) {
-              api.logger.info(`[FornaxTrace] Ended root span: spanId=${rootSpanId}, duration=${endTime - rootSpanStartTime}ms, traceId=${traceId}`);
+              api.logger.info(`[CozeloopTrace] Ended root span: spanId=${rootSpanId}, duration=${endTime - rootSpanStartTime}ms, traceId=${traceId}`);
             }
-            
+
             await exporter.flush();
             exporter.endTrace();
           }, 100);
@@ -797,9 +773,9 @@ const fornaxTracePlugin: OpenClawPlugin = {
     }
 
     api.logger.info(
-      `[FornaxTrace] Plugin activated (endpoint: ${config.endpoint}, workspace: ${config.workspaceId})`
+      `[CozeloopTrace] Plugin activated (endpoint: ${config.endpoint}, workspace: ${config.workspaceId})`
     );
   },
 };
 
-export default fornaxTracePlugin;
+export default cozeloopTracePlugin;

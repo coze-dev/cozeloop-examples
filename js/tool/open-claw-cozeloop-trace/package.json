@@ -1,7 +1,7 @@
 {
-  "name": "openclaw-fornax-trace",
+  "name": "openclaw-cozeloop-trace",
   "version": "0.1.0",
-  "description": "OpenClaw Plugin for reporting traces to Fornax via OpenTelemetry",
+  "description": "OpenClaw Plugin for reporting traces to CozeLoop via OpenTelemetry",
   "type": "module",
   "main": "dist/index.js",
   "exports": {
@@ -25,7 +25,7 @@
   "keywords": [
     "openclaw",
     "plugin",
-    "fornax",
+    "cozeloop",
     "tracing",
     "opentelemetry"
   ],
@@ -36,7 +36,6 @@
     "typescript": "^5.0.0"
   },
   "dependencies": {
-    "@next-ai/fornax-api": "^1.2.1",
     "@opentelemetry/api": "^1.7.0",
     "@opentelemetry/exporter-trace-otlp-proto": "^0.48.0",
     "@opentelemetry/resources": "^1.22.0",

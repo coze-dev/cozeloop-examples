@@ -1,4 +1,4 @@
-import type { SpanData, FornaxTraceConfig, OpenClawPluginApi } from "./types.js";
+import type { SpanData, CozeloopTraceConfig, OpenClawPluginApi } from "./types.js";
 import { trace, context, SpanKind, SpanStatusCode, Context, Span as ApiSpan } from "@opentelemetry/api";
 import { BasicTracerProvider, BatchSpanProcessor, Span } from "@opentelemetry/sdk-trace-base";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
@@ -7,56 +7,21 @@ import { ATTR_SERVICE_NAME, ATTR_SERVICE_INSTANCE_ID } from "@opentelemetry/sema
 import { hostname } from "os";
 import { basename } from "path";
 
-interface AuthResult {
-  authorization: string;
-  workspaceId: string;
-}
-
-async function getAuthFromFornaxSDK(config: FornaxTraceConfig, api: OpenClawPluginApi): Promise<AuthResult | null> {
-  if (!config.ak || !config.sk) {
-    return null;
-  }
-  
-  try {
-    api.logger.info(`[FornaxTrace] Importing @next-ai/fornax-api...`);
-    const { FornaxHttp } = await import("@next-ai/fornax-api");
-    api.logger.info(`[FornaxTrace] Creating FornaxHttp instance with region=${config.region || "CN"}...`);
-    const http = new FornaxHttp({
-      ak: config.ak,
-      sk: config.sk,
-      region: config.region || "CN",
-    });
-    api.logger.info(`[FornaxTrace] Calling http.getAccessToken()...`);
-    const token = await http.getAccessToken();
-    api.logger.info(`[FornaxTrace] Got token (length=${token.length}), now calling http.getSpaceId()...`);
-    const spaceId = await http.getSpaceId();
-    api.logger.info(`[FornaxTrace] Got spaceId=${spaceId}`);
-    return { authorization: token, workspaceId: spaceId };
-  } catch (error) {
-    api.logger.error(`[FornaxTrace] Failed to get auth from Fornax SDK: ${error}`);
-    throw error;
-  }
-}
-
-export class FornaxExporter {
-  private config: FornaxTraceConfig;
+export class CozeloopExporter {
+  private config: CozeloopTraceConfig;
   private api: OpenClawPluginApi;
   private provider: BasicTracerProvider | null = null;
   private tracer: ReturnType<typeof trace.getTracer> | null = null;
   private initialized: boolean = false;
   private initPromise: Promise<void> | null = null;
-  
+
   private currentRootSpan: ApiSpan | null = null;
   private currentRootContext: Context | null = null;
   private currentAgentSpan: ApiSpan | null = null;
   private currentAgentContext: Context | null = null;
   private openSpans: Map<string, ApiSpan> = new Map();
 
-  private cachedToken: string | null = null;
-  private cachedWorkspaceId: string | null = null;
-  private tokenExpireTime: number = 0;
-
-  constructor(api: OpenClawPluginApi, config: FornaxTraceConfig) {
+  constructor(api: OpenClawPluginApi, config: CozeloopTraceConfig) {
     this.api = api;
     this.config = config;
   }
@@ -64,14 +29,14 @@ export class FornaxExporter {
   private async ensureInitialized(): Promise<void> {
     if (this.initialized) return;
     if (this.initPromise) return this.initPromise;
-    
+
     this.initPromise = this.initialize();
     await this.initPromise;
   }
 
   private async initialize(): Promise<void> {
-    this.api.logger.info(`[FornaxTrace] Initializing exporter...`);
-    
+    this.api.logger.info(`[CozeloopTrace] Initializing exporter...`);
+
     const instanceName = this.config.serviceName || basename(process.cwd()) || "openclaw-agent";
     const instanceId = `${instanceName}@${hostname()}:${process.pid}`;
 
@@ -81,15 +46,16 @@ export class FornaxExporter {
       "host.name": hostname(),
     });
 
-    await this.refreshAuth();
-    
-    this.api.logger.info(`[FornaxTrace] Auth refreshed, workspaceId=${this.cachedWorkspaceId}, tokenLength=${this.cachedToken?.length}`);
+    const authorization = this.config.authorization;
+    const workspaceId = this.config.workspaceId;
+
+    this.api.logger.info(`[CozeloopTrace] Using authorization, workspaceId=${workspaceId}, tokenLength=${authorization?.length}`);
 
     const exporter = new OTLPTraceExporter({
       url: `${this.config.endpoint}/v1/traces`,
       headers: {
-        "Authorization": this.cachedToken!,
-        "cozeloop-workspace-id": this.cachedWorkspaceId!,
+        "Authorization": authorization!,
+        "cozeloop-workspace-id": workspaceId!,
       },
     });
 
@@ -101,56 +67,29 @@ export class FornaxExporter {
     }));
     this.provider.register();
 
-    this.tracer = trace.getTracer("openclaw-fornax-trace", "0.1.0");
+    this.tracer = trace.getTracer("openclaw-cozeloop-trace", "0.1.0");
     this.initialized = true;
 
-    this.api.logger.info(`[FornaxTrace] Exporter initialized with ${this.config.ak ? 'AK/SK' : 'Authorization'}, workspaceId=${this.cachedWorkspaceId}`);
-  }
-
-  private async refreshAuth(): Promise<void> {
-    this.api.logger.info(`[FornaxTrace] refreshAuth called, hasAK=${!!this.config.ak}, hasSK=${!!this.config.sk}`);
-    
-    const now = Date.now();
-    if (this.cachedToken && this.cachedWorkspaceId && this.tokenExpireTime > now + 60000) {
-      this.api.logger.info(`[FornaxTrace] Using cached token`);
-      return;
-    }
-
-    this.api.logger.info(`[FornaxTrace] Calling getAuthFromFornaxSDK...`);
-    const authResult = await getAuthFromFornaxSDK(this.config, this.api);
-    this.api.logger.info(`[FornaxTrace] getAuthFromFornaxSDK returned: ${authResult ? 'success' : 'null'}`);
-    
-    if (authResult) {
-      this.cachedToken = authResult.authorization;
-      this.cachedWorkspaceId = authResult.workspaceId;
-      this.tokenExpireTime = now + 2.5 * 60 * 60 * 1000;
-    } else if (this.config.authorization && this.config.workspaceId) {
-      this.api.logger.info(`[FornaxTrace] Using static authorization`);
-      this.cachedToken = this.config.authorization;
-      this.cachedWorkspaceId = this.config.workspaceId;
-      this.tokenExpireTime = Number.MAX_SAFE_INTEGER;
-    } else {
-      throw new Error("[FornaxTrace] Either 'ak'+'sk' or 'authorization'+'workspaceId' must be provided");
-    }
+    this.api.logger.info(`[CozeloopTrace] Exporter initialized with Authorization, workspaceId=${workspaceId}`);
   }
 
   startSpan(spanData: SpanData, spanId: string): void {
     this.ensureInitialized().then(() => {
       this.doStartSpan(spanData, spanId);
     }).catch(err => {
-      this.api.logger.error(`[FornaxTrace] Failed to start span: ${err}`);
+      this.api.logger.error(`[CozeloopTrace] Failed to start span: ${err}`);
     });
   }
 
   private doStartSpan(spanData: SpanData, spanId: string): void {
     if (!this.tracer) return;
-    
+
     const spanKind = this.getSpanKind(spanData.type);
     const isRoot = !spanData.parentSpanId;
     const isAgent = spanData.type === "agent";
-    
+
     let parentContext: Context;
-    
+
     if (isRoot) {
       this.currentRootSpan = null;
       this.currentRootContext = null;
@@ -185,20 +124,20 @@ export class FornaxExporter {
     if (isRoot) {
       this.currentRootSpan = span;
       this.currentRootContext = trace.setSpan(context.active(), span);
-      
+
       if (this.config.debug) {
         const sc = span.spanContext();
-        this.api.logger.info(`[FornaxTrace] Created ROOT span: name=${spanData.name}, traceId=${sc.traceId}, spanId=${sc.spanId}`);
+        this.api.logger.info(`[CozeloopTrace] Created ROOT span: name=${spanData.name}, traceId=${sc.traceId}, spanId=${sc.spanId}`);
       }
     }
-    
+
     if (isAgent) {
       this.currentAgentSpan = span;
       this.currentAgentContext = trace.setSpan(this.currentRootContext || context.active(), span);
-      
+
       if (this.config.debug) {
         const sc = span.spanContext();
-        this.api.logger.info(`[FornaxTrace] Created AGENT span: name=${spanData.name}, traceId=${sc.traceId}, spanId=${sc.spanId}`);
+        this.api.logger.info(`[CozeloopTrace] Created AGENT span: name=${spanData.name}, traceId=${sc.traceId}, spanId=${sc.spanId}`);
       }
     }
 
@@ -208,7 +147,7 @@ export class FornaxExporter {
     if (this.config.debug && !isRoot && !isAgent) {
       const spanContext = span.spanContext();
       this.api.logger.info(
-        `[FornaxTrace] Started span: name=${spanData.name}, type=${spanData.type}, ` +
+        `[CozeloopTrace] Started span: name=${spanData.name}, type=${spanData.type}, ` +
         `traceId=${spanContext.traceId}, spanId=${spanContext.spanId}`
       );
     }
@@ -218,7 +157,7 @@ export class FornaxExporter {
     const span = this.openSpans.get(spanId);
     if (!span) {
       if (this.config.debug) {
-        this.api.logger.info(`[FornaxTrace] Span not found for ending: spanId=${spanId}`);
+        this.api.logger.info(`[CozeloopTrace] Span not found for ending: spanId=${spanId}`);
       }
       return;
     }
@@ -247,7 +186,7 @@ export class FornaxExporter {
 
     if (this.config.debug) {
       const sc = span.spanContext();
-      this.api.logger.info(`[FornaxTrace] Ended span: spanId=${spanId}, traceId=${sc.traceId}`);
+      this.api.logger.info(`[CozeloopTrace] Ended span: spanId=${spanId}, traceId=${sc.traceId}`);
     }
   }
 
@@ -258,9 +197,9 @@ export class FornaxExporter {
     const spanKind = this.getSpanKind(spanData.type);
     const isRoot = !spanData.parentSpanId;
     const isAgent = spanData.type === "agent";
-    
+
     let parentContext: Context;
-    
+
     if (isRoot) {
       this.currentRootSpan = null;
       this.currentRootContext = null;
@@ -293,10 +232,10 @@ export class FornaxExporter {
     if (isRoot) {
       this.currentRootSpan = span;
       this.currentRootContext = trace.setSpan(context.active(), span);
-      
+
       if (this.config.debug) {
         const sc = span.spanContext();
-        this.api.logger.info(`[FornaxTrace] Created ROOT span: name=${spanData.name}, traceId=${sc.traceId}, spanId=${sc.spanId}`);
+        this.api.logger.info(`[CozeloopTrace] Created ROOT span: name=${spanData.name}, traceId=${sc.traceId}, spanId=${sc.spanId}`);
       }
     }
 
@@ -314,7 +253,7 @@ export class FornaxExporter {
     if (this.config.debug) {
       const spanContext = span.spanContext();
       this.api.logger.info(
-        `[FornaxTrace] Created span: name=${spanData.name}, type=${spanData.type}, ` +
+        `[CozeloopTrace] Created span: name=${spanData.name}, type=${spanData.type}, ` +
         `traceId=${spanContext.traceId}, spanId=${spanContext.spanId}, isRoot=${isRoot}`
       );
     }
@@ -322,8 +261,8 @@ export class FornaxExporter {
 
   private setSpanInputOutput(span: ApiSpan, spanData: SpanData): void {
     if (spanData.input !== undefined) {
-      const inputStr = typeof spanData.input === "string" 
-        ? spanData.input 
+      const inputStr = typeof spanData.input === "string"
+        ? spanData.input
         : JSON.stringify(spanData.input);
       span.setAttribute("cozeloop.input", inputStr.substring(0, 3200000));
     }
@@ -343,7 +282,7 @@ export class FornaxExporter {
     this.currentAgentContext = null;
     this.openSpans.clear();
     if (this.config.debug) {
-      this.api.logger.info(`[FornaxTrace] Trace ended, context cleared`);
+      this.api.logger.info(`[CozeloopTrace] Trace ended, context cleared`);
     }
   }
 

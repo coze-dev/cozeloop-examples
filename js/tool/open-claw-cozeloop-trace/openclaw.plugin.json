@@ -1,17 +1,17 @@
 {
-  "id": "openclaw-fornax-trace",
-  "name": "OpenClaw Fornax Trace",
+  "id": "openclaw-cozeloop-trace",
+  "name": "OpenClaw CozeLoop Trace",
   "version": "0.1.0",
-  "description": "Report OpenClaw execution traces to Fornax via OpenTelemetry",
+  "description": "Report OpenClaw execution traces to CozeLoop via OpenTelemetry",
   "type": "plugin",
-  "entry": "./index.js",
+  "entry": "./dist/index.js",
   "configSchema": {
     "type": "object",
     "properties": {
       "endpoint": {
         "type": "string",
-        "default": "https://fornax.bytedance.net/open-api/observability/opentelemetry",
-        "description": "Fornax OTLP endpoint URL"
+        "default": "https://api.coze.cn/v1/loop/opentelemetry",
+        "description": "CozeLoop OTLP endpoint URL"
       },
       "authorization": {
         "type": "string",

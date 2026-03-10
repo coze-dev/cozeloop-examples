@@ -40,12 +40,9 @@ export interface OpenClawPlugin {
   activate(api: OpenClawPluginApi): Promise<void> | void;
 }
 
-export interface FornaxTraceConfig {
+export interface CozeloopTraceConfig {
   endpoint: string;
   authorization?: string;
-  ak?: string;
-  sk?: string;
-  region?: 'CN' | 'I18N' | 'I18N_DEV' | 'I18N_VA' | 'NON_TT' | 'BOE_CN';
   workspaceId: string;
   serviceName: string;
   debug: boolean;
