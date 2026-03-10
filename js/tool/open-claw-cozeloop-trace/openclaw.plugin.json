@@ -1,0 +1,55 @@
+{
+  "id": "openclaw-fornax-trace",
+  "name": "OpenClaw Fornax Trace",
+  "version": "0.1.0",
+  "description": "Report OpenClaw execution traces to Fornax via OpenTelemetry",
+  "type": "plugin",
+  "entry": "./index.js",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "endpoint": {
+        "type": "string",
+        "default": "https://fornax.bytedance.net/open-api/observability/opentelemetry",
+        "description": "Fornax OTLP endpoint URL"
+      },
+      "authorization": {
+        "type": "string",
+        "default": "",
+        "description": "Authorization header value"
+      },
+      "workspaceId": {
+        "type": "string",
+        "default": "",
+        "description": "Cozeloop workspace ID"
+      },
+      "serviceName": {
+        "type": "string",
+        "default": "openclaw-agent",
+        "description": "Service name for traces"
+      },
+      "debug": {
+        "type": "boolean",
+        "default": false,
+        "description": "Enable debug logging"
+      },
+      "batchSize": {
+        "type": "number",
+        "default": 10,
+        "description": "Number of spans to buffer before sending"
+      },
+      "batchInterval": {
+        "type": "number",
+        "default": 5000,
+        "description": "Maximum time (ms) to wait before sending buffered spans"
+      },
+      "enabledHooks": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "List of hooks to enable (if not set, all hooks are enabled)"
+      }
+    }
+  }
+}
