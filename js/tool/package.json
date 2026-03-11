@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@cozeloop/openclaw-cozeloop-trace": "^0.1.0"
+  }
+}

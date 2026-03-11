@@ -7,8 +7,7 @@ import os from "node:os";
 import path from "node:path";
 
 const PLUGIN_NAME = "openclaw-cozeloop-trace";
-const PACKAGE_PATH = "openclaw-cozeloop-trace";
-//const PACKAGE_PATH = "/Users/taoyifan/go/src/github.com/coze-dev/cozeloop-examples/js/tool/openclaw-cozeloop-trace/openclaw-cozeloop-trace-0.1.0.tgz";
+const PACKAGE_PATH = "@cozeloop/openclaw-cozeloop-trace";
 const COZELOOP_ENDPOINT = "https://api.coze.cn/v1/loop/opentelemetry";
 
 type OpenClawConfig = {
@@ -83,23 +82,23 @@ async function collectPluginConfig(): Promise<{ authorization: string; workspace
     {
       name: "satToken",
       type: "password",
-      message: "请输入 SAT Token",
+      message: "请输入服务访问令牌(sat_xxx)。服务访问令牌获取方式可参考：https://loop.coze.cn/open/docs/cozeloop/authentication-for-sdk#83f924a1",
       mask: "*",
       validate: (input: string) => {
         if (input && input.trim()) return true;
         if (existingAuthorization) return true;
-        return "SAT Token 不能为空";
+        return "服务访问令牌不能为空";
       },
     },
     {
       name: "workspaceId",
       type: "input",
-      message: "请输入 CozeLoop Workspace ID",
+      message: "请输入扣子罗盘空间id。空间id获取方式可参考：https://loop.coze.cn/open/docs/cozeloop/get_workspace_id_and_token",
       default: existingWorkspaceId || undefined,
       validate: (input: string) => {
         if (input && input.trim()) return true;
         if (existingWorkspaceId) return true;
-        return "Workspace ID 不能为空";
+        return "空间id不能为空";
       },
     },
   ]);
@@ -109,7 +108,7 @@ async function collectPluginConfig(): Promise<{ authorization: string; workspace
   const workspaceId = String(answers.workspaceId || existingWorkspaceId || "").trim();
 
   if (!authorization || !workspaceId) {
-    throw new Error("SAT Token 或 Workspace ID 缺失");
+    throw new Error("服务访问令牌 或 空间id缺失");
   }
 
   return { authorization, workspaceId };
