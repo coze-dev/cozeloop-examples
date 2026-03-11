@@ -29,6 +29,13 @@ function generateId(length = 16): string {
   return result;
 }
 
+function safeClone<T>(value: T): T {
+  if (typeof (globalThis as unknown as { structuredClone?: unknown }).structuredClone === "function") {
+    return (globalThis as unknown as { structuredClone: (input: T) => T }).structuredClone(value);
+  }
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
 function normalizeChannelId(input: string, defaultPlatform = "system"): string {
   if (!input || input === "unknown") {
     return `${defaultPlatform}/unknown`;
@@ -284,7 +291,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
       api.on<SessionStartEvent>("session_start", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx, event.sessionId);
         if (config.debug) {
-          api.logger.info(`[CozeloopTrace] session_start hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}`);
+          api.logger.info(`[CozeloopTrace] session_start hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}`);
         }
         const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "session_start");
         const now = Date.now();
@@ -308,7 +315,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
       api.on<SessionEndEvent>("session_end", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx, event.sessionId);
         if (config.debug) {
-          api.logger.info(`[CozeloopTrace] session_end hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}`);
+          api.logger.info(`[CozeloopTrace] session_end hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}`);
         }
         const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "session_end");
         const now = Date.now();
@@ -339,7 +346,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
       api.on<MessageReceivedEvent>("message_received", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx, event.from || event.metadata?.senderId);
         if (config.debug) {
-          api.logger.info(`[CozeloopTrace] message_received hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}, event.from=${event.from}`);
+          api.logger.info(`[CozeloopTrace] message_received hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}, event.from=${event.from}`);
         }
         const { ctx, channelId, isNew } = getOrCreateContext(rawChannelId, undefined, "message_received");
         const now = Date.now();
@@ -371,7 +378,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
               traceId: ctx.traceId,
               spanId: ctx.rootSpanId,
             };
-            exporter.startSpan(rootSpanData, ctx.rootSpanId);
+            await exporter.startSpan(rootSpanData, ctx.rootSpanId);
             if (config.debug) {
               api.logger.info(`[CozeloopTrace] Started root span: traceId=${ctx.traceId}, spanId=${ctx.rootSpanId}`);
             }
@@ -444,7 +451,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
       api.on<LlmInputEvent>("llm_input", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx);
         if (config.debug) {
-          api.logger.info(`[CozeloopTrace] llm_input hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}, event.runId=${event.runId}`);
+          api.logger.info(`[CozeloopTrace] llm_input hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}, event.runId=${event.runId}`);
         }
         const { ctx } = getOrCreateContext(rawChannelId, event.runId, "llm_input");
         ctx.llmStartTime = Date.now();
@@ -452,13 +459,13 @@ const cozeloopTracePlugin: OpenClawPlugin = {
 
         const messages: Array<{ role: string; content: unknown }> = [];
         if (event.systemPrompt) {
-          messages.push({ role: "system", content: event.systemPrompt });
+          messages.push({ role: "system", content: safeClone(event.systemPrompt) });
         }
         if (event.historyMessages && event.historyMessages.length > 0) {
-          messages.push(...event.historyMessages);
+          messages.push(...event.historyMessages.map((msg) => safeClone(msg)));
         }
         if (event.prompt) {
-          messages.push({ role: "user", content: event.prompt });
+          messages.push({ role: "user", content: safeClone(event.prompt) });
         }
         const convertToolCallInPlace = (target: Record<string, unknown>): void => {
           if (target.type !== "toolCall") return;
@@ -509,7 +516,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
           api.logger.info(`[CozeloopTrace][DEBUG] llm_output event.lastAssistant=${JSON.stringify(event.lastAssistant)}`);
           api.logger.info(`[CozeloopTrace][DEBUG] llm_output event keys=${JSON.stringify(Object.keys(event as unknown as object))}`);
 
-          api.logger.info(`[CozeloopTrace] llm_output hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}, event.runId=${event.runId}`);
+          api.logger.info(`[CozeloopTrace] llm_output hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}, event.runId=${event.runId}`);
         }
         const { ctx, channelId } = getOrCreateContext(rawChannelId, event.runId, "llm_output");
         const now = Date.now();
@@ -583,7 +590,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
       api.on<BeforeToolCallEvent>("before_tool_call", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx);
         if (config.debug) {
-          api.logger.info(`[CozeloopTrace] before_tool_call hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}, toolName=${event.toolName}`);
+          api.logger.info(`[CozeloopTrace] before_tool_call hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}, toolName=${event.toolName}`);
         }
         const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "before_tool_call");
 
@@ -605,7 +612,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
     if (shouldHookEnabled("after_tool_call")) {
       api.on<AfterToolCallEvent>("after_tool_call", async (event, hookCtx: PluginHookContext) => {
         if (config.debug) {
-          api.logger.info(`[CozeloopTrace] after_tool_call hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}, toolName=${event.toolName}`);
+          api.logger.info(`[CozeloopTrace] after_tool_call hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}, toolName=${event.toolName}`);
         }
 
         if (!pendingToolCall || pendingToolCall.toolName !== event.toolName) {
@@ -650,7 +657,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         const rawChannelId = resolveChannelId(hookCtx);
         const agentId = hookCtx.agentId || event.agentId || "main";
         if (config.debug) {
-          api.logger.info(`[CozeloopTrace] before_agent_start hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId, agentId: hookCtx.agentId})}, event.agentId=${event.agentId}`);
+          api.logger.info(`[CozeloopTrace] before_agent_start hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId, agentId: hookCtx.agentId })}, event.agentId=${event.agentId}`);
         }
         const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "before_agent_start");
 
@@ -680,7 +687,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
           parentSpanId: ctx.rootSpanId,
         };
 
-        exporter.startSpan(spanData, ctx.agentSpanId);
+        await exporter.startSpan(spanData, ctx.agentSpanId);
 
         if (config.debug) {
           api.logger.info(`[CozeloopTrace] Started agent span: ${agentId}, spanId=${ctx.agentSpanId}, traceId=${ctx.traceId}`);
@@ -692,7 +699,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
       api.on<AgentEndEvent>("agent_end", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx);
         if (config.debug) {
-          api.logger.info(`[CozeloopTrace] agent_end hookCtx: ${JSON.stringify({channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId})}`);
+          api.logger.info(`[CozeloopTrace] agent_end hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}`);
         }
         const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "agent_end");
         const now = Date.now();

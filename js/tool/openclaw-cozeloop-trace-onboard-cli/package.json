@@ -1,0 +1,29 @@
+{
+  "name": "@cozeloop/openclaw-cozeloop-trace-onboard-cli",
+  "version": "0.1.0",
+  "description": "One-click installer for openclaw-cozeloop-trace plugin",
+  "type": "module",
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "bin": {
+    "openclaw-cozeloop-trace-onboard-cli": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/inquirer": "^9.0.9",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "commander": "^14.0.3",
+    "inquirer": "^8.2.7"
+  }
+}

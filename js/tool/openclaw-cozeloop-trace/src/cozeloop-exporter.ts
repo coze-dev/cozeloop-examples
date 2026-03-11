@@ -73,12 +73,13 @@ export class CozeloopExporter {
     this.api.logger.info(`[CozeloopTrace] Exporter initialized with Authorization, workspaceId=${workspaceId}`);
   }
 
-  startSpan(spanData: SpanData, spanId: string): void {
-    this.ensureInitialized().then(() => {
+  async startSpan(spanData: SpanData, spanId: string): Promise<void> {
+    try {
+      await this.ensureInitialized();
       this.doStartSpan(spanData, spanId);
-    }).catch(err => {
+    } catch (err) {
       this.api.logger.error(`[CozeloopTrace] Failed to start span: ${err}`);
-    });
+    }
   }
 
   private doStartSpan(spanData: SpanData, spanId: string): void {
