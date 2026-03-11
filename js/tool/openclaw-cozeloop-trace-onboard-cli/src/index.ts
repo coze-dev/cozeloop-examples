@@ -82,7 +82,7 @@ async function collectPluginConfig(): Promise<{ authorization: string; workspace
     {
       name: "satToken",
       type: "password",
-      message: "请输入服务访问令牌(sat_xxx)。服务访问令牌获取方式可参考：https://loop.coze.cn/open/docs/cozeloop/authentication-for-sdk#83f924a1",
+      message: "请输入服务访问令牌(sat_xxx)(服务访问令牌获取方式可参考：https://loop.coze.cn/open/docs/cozeloop/authentication-for-sdk#83f924a1):",
       mask: "*",
       validate: (input: string) => {
         if (input && input.trim()) return true;
@@ -93,7 +93,7 @@ async function collectPluginConfig(): Promise<{ authorization: string; workspace
     {
       name: "workspaceId",
       type: "input",
-      message: "请输入扣子罗盘空间id。空间id获取方式可参考：https://loop.coze.cn/open/docs/cozeloop/get_workspace_id_and_token",
+      message: "请输入扣子罗盘空间id(空间id获取方式可参考：https://loop.coze.cn/open/docs/cozeloop/get_workspace_id_and_token):",
       default: existingWorkspaceId || undefined,
       validate: (input: string) => {
         if (input && input.trim()) return true;
