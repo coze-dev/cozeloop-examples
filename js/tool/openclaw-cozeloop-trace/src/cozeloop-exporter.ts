@@ -103,10 +103,14 @@ export class CozeloopExporter {
       parentContext = this.currentAgentContext || this.currentRootContext || context.active();
     }
 
-    const systemTagRuntime = JSON.stringify({
+    const runtimeTag: Record<string, string> = {
       language: "nodejs",
       library: "openclaw",
-    });
+    };
+    if (process.env.COZELOOP_SCENE) {
+      runtimeTag.scene = process.env.COZELOOP_SCENE;
+    }
+    const systemTagRuntime = JSON.stringify(runtimeTag);
 
     const span = this.tracer.startSpan(
       spanData.name,
@@ -211,10 +215,14 @@ export class CozeloopExporter {
       parentContext = this.currentAgentContext || this.currentRootContext || context.active();
     }
 
-    const systemTagRuntime = JSON.stringify({
+    const runtimeTag: Record<string, string> = {
       language: "nodejs",
       library: "openclaw",
-    });
+    };
+    if (process.env.COZELOOP_SCENE) {
+      runtimeTag.scene = process.env.COZELOOP_SCENE;
+    }
+    const systemTagRuntime = JSON.stringify(runtimeTag);
 
     const span = this.tracer.startSpan(
       spanData.name,
