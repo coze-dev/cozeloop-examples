@@ -634,11 +634,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
           "tool",
           toolStartTime,
           now,
-          {
-            "tool.name": toolName,
-            "tool.duration_ms": event.durationMs || (now - toolStartTime),
-            "tool.error": event.error ? true : false,
-          },
+          event.error ? { "error.msg": String(event.error) } : {},
           toolInput,
           event.error ? { error: event.error } : event.result
         );
