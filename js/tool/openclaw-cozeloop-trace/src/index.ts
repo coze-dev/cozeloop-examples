@@ -355,16 +355,23 @@ const cozeloopTracePlugin: OpenClawPlugin = {
           role = "user";
         }
 
-        if (role === "user" && !rawChannelId.startsWith("agent/")) {
-          lastUserChannelId = channelId;
-          lastUserTraceContext = ctx;
-          ctx.userInput = event.content;
-          if (config.debug) {
-            api.logger.info(`[CozeloopTrace] Saved user context: channelId=${channelId}, traceId=${ctx.traceId}`);
+        const isNonAgentChannel = !rawChannelId.startsWith("agent/");
+
+        if (isNonAgentChannel) {
+          if (role === "user" || !role) {
+            lastUserChannelId = channelId;
+            lastUserTraceContext = ctx;
+            ctx.userInput = event.content;
+            if (config.debug) {
+              api.logger.info(`[CozeloopTrace] Saved user context: channelId=${channelId}, traceId=${ctx.traceId}`);
+            }
           }
 
-          if (isNew) {
+          if (!ctx.rootSpanStartTime) {
             ctx.rootSpanStartTime = now;
+            if (!ctx.userInput) {
+              ctx.userInput = event.content;
+            }
             const rootSpanData: SpanData = {
               name: "openclaw_request",
               type: "entry",
@@ -382,6 +389,11 @@ const cozeloopTracePlugin: OpenClawPlugin = {
             if (config.debug) {
               api.logger.info(`[CozeloopTrace] Started root span: traceId=${ctx.traceId}, spanId=${ctx.rootSpanId}`);
             }
+          }
+
+          if (!lastUserTraceContext) {
+            lastUserTraceContext = ctx;
+            lastUserChannelId = channelId;
           }
         }
 
