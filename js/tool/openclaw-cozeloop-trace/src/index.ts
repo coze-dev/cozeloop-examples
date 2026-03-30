@@ -19,6 +19,9 @@ import type {
   SpanData,
 } from "./types.js";
 import { CozeloopExporter } from "./cozeloop-exporter.js";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 
 function generateId(length = 16): string {
   const chars = "0123456789abcdef";
@@ -34,6 +37,288 @@ function safeClone<T>(value: T): T {
     return (globalThis as unknown as { structuredClone: (input: T) => T }).structuredClone(value);
   }
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function resolveOpenclawStateDir(): string {
+  const override = process.env.OPENCLAW_STATE_DIR?.trim() || process.env.CLAWDBOT_STATE_DIR?.trim();
+  if (override) return resolve(override.startsWith("~") ? override.replace(/^~(?=$|[\\/])/, homedir()) : override);
+
+  const home = homedir();
+  const newDir = join(home, ".openclaw");
+  try { if (existsSync(newDir)) return newDir; } catch { /* ignore */ }
+
+  for (const legacy of [".clawdbot", ".moldbot", ".moltbot"]) {
+    const legacyDir = join(home, legacy);
+    try { if (existsSync(legacyDir)) return legacyDir; } catch { /* ignore */ }
+  }
+
+  return newDir;
+}
+
+function resolveAgentIdFromHookCtx(hookCtx: PluginHookContext): string {
+  const explicit = (hookCtx.agentId as string)?.trim()?.toLowerCase();
+  if (explicit) return explicit;
+
+  const sessionKey = (hookCtx.sessionKey as string)?.trim()?.toLowerCase();
+  if (sessionKey) {
+    const match = sessionKey.match(/^agent:([^:]+):/);
+    if (match?.[1]) return match[1];
+  }
+
+  return "main";
+}
+
+function resolveSessionFile(hookCtx: PluginHookContext): string | undefined {
+  try {
+    const stateDir = resolveOpenclawStateDir();
+    const agentId = resolveAgentIdFromHookCtx(hookCtx);
+    const sessionsDir = join(stateDir, "agents", agentId, "sessions");
+    const sessionId = (hookCtx.sessionId || "") as string;
+    let targetFile: string | undefined;
+
+    const files = readdirSync(sessionsDir);
+    if (sessionId) {
+      for (const f of files) {
+        if (!f.endsWith(".jsonl")) continue;
+        if (f.includes(".deleted.") || f.includes(".reset.")) continue;
+        if (f.startsWith(sessionId)) {
+          targetFile = join(sessionsDir, f);
+          break;
+        }
+      }
+    }
+
+    if (!targetFile) {
+      const jsonlFiles = files.filter(
+        (f) => f.endsWith(".jsonl") && !f.includes(".deleted.") && !f.includes(".reset.")
+      );
+      if (jsonlFiles.length > 0) {
+        targetFile = join(sessionsDir, jsonlFiles[jsonlFiles.length - 1]);
+      }
+    }
+
+    return targetFile;
+  } catch {
+    return undefined;
+  }
+}
+
+function formatAssistantOutput(content: unknown, stopReason?: string): Record<string, unknown> {
+  const contentItems = Array.isArray(content) ? content as Array<Record<string, unknown>> : [];
+
+  const toolCalls: Array<Record<string, unknown>> = [];
+  const messageContent: unknown[] = [];
+
+  for (const item of contentItems) {
+    if (!item || typeof item !== "object") {
+      messageContent.push(item);
+      continue;
+    }
+
+    const itemType = (item as Record<string, unknown>).type;
+
+    if (itemType === "toolCall") {
+      const toolCallItem: Record<string, unknown> = {
+        type: "tool_use",
+        id: item.id ?? "",
+        name: item.name ?? "",
+        input: item.arguments ?? item.input ?? {},
+      };
+      messageContent.push(toolCallItem);
+      toolCalls.push({
+        function: {
+          arguments: typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments ?? item.input ?? {}),
+          name: item.name ?? "",
+        },
+        id: item.id ?? "",
+        type: "function",
+      });
+    } else if (itemType === "text") {
+      messageContent.push({ type: "text", text: item.text ?? "" });
+    } else if (itemType === "thinking") {
+      messageContent.push({
+        type: "thinking",
+        thinking: item.thinking ?? "",
+        signature: item.signature,
+      });
+    } else {
+      messageContent.push(item);
+    }
+  }
+
+  const message: Record<string, unknown> = {
+    content: messageContent.length === 1 && (messageContent[0] as Record<string, unknown>)?.type === "text"
+      ? ((messageContent[0] as Record<string, unknown>).text ?? "")
+      : messageContent,
+    role: "assistant",
+    tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+    function_call: null,
+    provider_specific_fields: null,
+  };
+
+  return {
+    choices: [
+      {
+        finish_reason: stopReason === "toolUse" ? "tool_calls" : "stop",
+        message,
+      },
+    ],
+  };
+}
+
+function convertAssistantContentForMessages(content: unknown): unknown[] {
+  if (!Array.isArray(content)) return [{ type: "text", text: String(content ?? "") }];
+
+  const result: unknown[] = [];
+  for (const item of content as Array<Record<string, unknown>>) {
+    if (!item || typeof item !== "object") {
+      result.push(item);
+      continue;
+    }
+    if (item.type === "toolCall") {
+      result.push({
+        type: "tool_use",
+        id: item.id ?? "",
+        name: item.name ?? "",
+        input: item.arguments ?? item.input ?? {},
+      });
+    } else if (item.type === "thinking") {
+      result.push({
+        type: "thinking",
+        thinking: item.thinking ?? "",
+        signature: item.signature,
+      });
+    } else {
+      result.push(item);
+    }
+  }
+  return result;
+}
+
+function convertToolResultsForMessages(
+  toolResultEntries: ReactEntry[]
+): { role: string; content: unknown[] } {
+  const contentItems: unknown[] = [];
+  for (const tr of toolResultEntries) {
+    let textContent = "";
+    if (Array.isArray(tr.content)) {
+      const parts = tr.content as Array<Record<string, unknown>>;
+      textContent = parts
+        .filter((p) => p?.type === "text")
+        .map((p) => String(p.text ?? ""))
+        .join("\n");
+    } else if (typeof tr.content === "string") {
+      textContent = tr.content;
+    } else {
+      textContent = JSON.stringify(tr.content);
+    }
+
+    contentItems.push({
+      type: "tool_result",
+      tool_use_id: tr.toolCallId ?? "",
+      content: textContent,
+      is_error: tr.isError ?? false,
+    });
+  }
+  return { role: "user", content: contentItems };
+}
+
+interface ReactEntry {
+  type: "assistant" | "toolResult";
+  content: unknown;
+  provider?: string;
+  model?: string;
+  usage?: { input?: number; output?: number };
+  stopReason?: string;
+  timestamp?: number;
+  writtenAt?: number;
+  toolCallId?: string;
+  toolName?: string;
+  isError?: boolean;
+}
+
+function parseEntryWrittenAt(entry: Record<string, unknown>): number | undefined {
+  const ts = entry.timestamp;
+  if (typeof ts === "string") {
+    const ms = new Date(ts).getTime();
+    if (!Number.isNaN(ms)) return ms;
+  }
+  if (typeof ts === "number") return ts;
+  return undefined;
+}
+
+function readCurrentTurnReactSequence(hookCtx: PluginHookContext): { entries: ReactEntry[]; userWrittenAt?: number } {
+  try {
+    const targetFile = resolveSessionFile(hookCtx);
+    if (!targetFile) return { entries: [] };
+
+    const raw = readFileSync(targetFile, "utf-8");
+    const lines = raw.trim().split("\n");
+
+    let lastUserIdx = -1;
+    let userWrittenAt: number | undefined;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      try {
+        const entry = JSON.parse(line) as Record<string, unknown>;
+        if (entry.type !== "message") continue;
+        const msg = entry.message as Record<string, unknown> | undefined;
+        if (msg?.role === "user") {
+          lastUserIdx = i;
+          userWrittenAt = parseEntryWrittenAt(entry);
+          break;
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    if (lastUserIdx < 0) return { entries: [] };
+
+    const entries: ReactEntry[] = [];
+    for (let i = lastUserIdx + 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      try {
+        const entry = JSON.parse(line) as Record<string, unknown>;
+        if (entry.type !== "message") continue;
+        const msg = entry.message as Record<string, unknown> | undefined;
+        if (!msg) continue;
+
+        const writtenAt = parseEntryWrittenAt(entry);
+
+        if (msg.role === "assistant") {
+          entries.push({
+            type: "assistant",
+            content: msg.content,
+            provider: msg.provider as string | undefined,
+            model: msg.model as string | undefined,
+            usage: msg.usage as { input?: number; output?: number } | undefined,
+            stopReason: msg.stopReason as string | undefined,
+            timestamp: msg.timestamp as number | undefined,
+            writtenAt,
+          });
+        } else if (msg.role === "toolResult") {
+          entries.push({
+            type: "toolResult",
+            content: msg.content,
+            toolCallId: msg.toolCallId as string | undefined,
+            toolName: msg.toolName as string | undefined,
+            isError: msg.isError as boolean | undefined,
+            timestamp: msg.timestamp as number | undefined,
+            writtenAt,
+          });
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return { entries, userWrittenAt };
+  } catch {
+    return { entries: [] };
+  }
 }
 
 function normalizeChannelId(input: string, defaultPlatform = "system"): string {
@@ -98,6 +383,25 @@ interface TraceContext {
   userInput?: unknown;
   rootSpanStartTime?: number;
   lastOutput?: unknown;
+  reactCount?: number;
+  lastModelProvider?: string;
+  lastModelId?: string;
+  pendingToolSpans?: Array<{
+    toolName: string;
+    toolSpanId: string;
+    toolStartTime: number;
+    toolEndTime: number;
+    toolInput: unknown;
+    toolOutput: unknown;
+    toolError?: string;
+  }>;
+  sessionBasedSpansCreated?: boolean;
+  pendingCleanup?: {
+    savedLastUserTraceContext: TraceContext | undefined;
+    savedLastUserChannelId: string | undefined;
+    originalChannelId: string;
+    agentChannelId: string;
+  };
 }
 
 let lastUserChannelId: string | undefined;
@@ -258,6 +562,158 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         spanId: generateId(16),
         parentSpanId: parentSpanId || ctx.rootSpanId,
       };
+    };
+
+    const buildReactSpans = async (
+      ctx: TraceContext,
+      channelId: string,
+      entries: ReactEntry[],
+      initialInput: unknown,
+      agentStartTime: number,
+      userWrittenAt?: number
+    ): Promise<number> => {
+      const reactMessages: Array<{ role: string; content: unknown }> = [];
+      if (initialInput && typeof initialInput === "object") {
+        const inputObj = initialInput as Record<string, unknown>;
+        if ("messages" in inputObj && Array.isArray(inputObj.messages)) {
+          for (const msg of inputObj.messages as Array<Record<string, unknown>>) {
+            reactMessages.push({ role: String(msg.role || ""), content: safeClone(msg.content) });
+          }
+        }
+      }
+
+      let reactRound = 0;
+      let modelSpanCount = 0;
+      let prevWrittenAt = userWrittenAt || agentStartTime;
+
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        const entryWrittenAt = entry.writtenAt || prevWrittenAt;
+
+        if (entry.type === "assistant") {
+          reactRound++;
+          modelSpanCount++;
+
+          const provider = entry.provider || ctx.lastModelProvider || "unknown";
+          const model = entry.model || ctx.lastModelId || "unknown";
+          const spanStartTime = prevWrittenAt;
+          const spanEndTime = entryWrittenAt;
+
+          const modelSpan = createSpan(
+            ctx,
+            channelId,
+            `${provider}/${model}`,
+            "model",
+            spanStartTime,
+            spanEndTime,
+            {
+              "gen_ai.provider.name": provider,
+              "gen_ai.request.model": model,
+              "gen_ai.usage.input_tokens": entry.usage?.input ?? 0,
+              "gen_ai.usage.output_tokens": entry.usage?.output ?? 0,
+              "react_round": reactRound,
+            },
+            { messages: reactMessages.map((msg) => safeClone(msg)) },
+            formatAssistantOutput(entry.content, entry.stopReason)
+          );
+
+          await exporter.export(modelSpan);
+
+          reactMessages.push({
+            role: "assistant",
+            content: convertAssistantContentForMessages(entry.content),
+          });
+          prevWrittenAt = entryWrittenAt;
+        } else if (entry.type === "toolResult") {
+          const toolSpanStartTime = prevWrittenAt;
+          const toolSpanEndTime = entryWrittenAt;
+
+          let toolInput: unknown = undefined;
+          for (let j = i - 1; j >= 0; j--) {
+            if (entries[j].type === "assistant") {
+              const assistantContent = entries[j].content;
+              if (Array.isArray(assistantContent)) {
+                for (const item of assistantContent as Array<Record<string, unknown>>) {
+                  if (item?.type === "toolCall" && item.id === entry.toolCallId) {
+                    toolInput = { name: item.name, arguments: item.arguments ?? item.input };
+                    break;
+                  }
+                }
+              }
+              break;
+            }
+          }
+
+          const toolAttrs: Record<string, string | number | boolean> = {};
+          if (entry.isError) {
+            toolAttrs["error.msg"] = "tool returned error";
+          }
+
+          const toolSpan = createSpan(
+            ctx,
+            channelId,
+            entry.toolName || "unknown_tool",
+            "tool",
+            toolSpanStartTime,
+            toolSpanEndTime,
+            toolAttrs,
+            toolInput,
+            entry.content
+          );
+
+          await exporter.export(toolSpan);
+
+          const consecutiveToolResults: ReactEntry[] = [entry];
+          while (i + 1 < entries.length && entries[i + 1].type === "toolResult") {
+            i++;
+            const nextTr = entries[i];
+            consecutiveToolResults.push(nextTr);
+
+            const nextWrittenAt = nextTr.writtenAt || prevWrittenAt;
+            let nextToolInput: unknown = undefined;
+            for (let j = i - 1; j >= 0; j--) {
+              if (entries[j].type === "assistant") {
+                const ac = entries[j].content;
+                if (Array.isArray(ac)) {
+                  for (const item of ac as Array<Record<string, unknown>>) {
+                    if (item?.type === "toolCall" && item.id === nextTr.toolCallId) {
+                      nextToolInput = { name: item.name, arguments: item.arguments ?? item.input };
+                      break;
+                    }
+                  }
+                }
+                break;
+              }
+            }
+
+            const nextToolAttrs: Record<string, string | number | boolean> = {};
+            if (nextTr.isError) {
+              nextToolAttrs["error.msg"] = "tool returned error";
+            }
+
+            const nextToolSpan = createSpan(
+              ctx,
+              channelId,
+              nextTr.toolName || "unknown_tool",
+              "tool",
+              prevWrittenAt,
+              nextWrittenAt,
+              nextToolAttrs,
+              nextToolInput,
+              nextTr.content
+            );
+
+            await exporter.export(nextToolSpan);
+            prevWrittenAt = nextWrittenAt;
+          }
+
+          const toolResultMsg = convertToolResultsForMessages(consecutiveToolResults);
+          reactMessages.push(toolResultMsg);
+          prevWrittenAt = entryWrittenAt;
+        }
+      }
+
+      return modelSpanCount;
     };
 
     api.on<GatewayStopEvent>("gateway_stop", async () => {
@@ -468,6 +924,9 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         const { ctx } = getOrCreateContext(rawChannelId, event.runId, "llm_input");
         ctx.llmStartTime = Date.now();
         ctx.llmSpanId = generateId(16);
+        ctx.lastModelProvider = event.provider;
+        ctx.lastModelId = event.model;
+        ctx.reactCount = 0;
 
         const messages: Array<{ role: string; content: unknown }> = [];
         if (event.systemPrompt) {
@@ -523,7 +982,6 @@ const cozeloopTracePlugin: OpenClawPlugin = {
       api.on<LlmOutputEvent>("llm_output", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx);
         if (config.debug) {
-          // DEBUG: dump full event to diagnose token fields
           api.logger.info(`[CozeloopTrace][DEBUG] llm_output event.usage=${JSON.stringify(event.usage)}`);
           api.logger.info(`[CozeloopTrace][DEBUG] llm_output event.lastAssistant=${JSON.stringify(event.lastAssistant)}`);
           api.logger.info(`[CozeloopTrace][DEBUG] llm_output event keys=${JSON.stringify(Object.keys(event as unknown as object))}`);
@@ -552,48 +1010,156 @@ const cozeloopTracePlugin: OpenClawPlugin = {
           api.logger.info(`[CozeloopTrace] llm_output ctx: traceId=${ctx.traceId}, rootSpanId=${ctx.rootSpanId}, llmSpanId=${llmSpanId || "none"}, hasInput=${!!llmInput}`);
         }
 
-        // event.usage comes from getUsageTotals() which may be undefined when the
-        // stream wrapper doesn't populate assistantMessage.usage (regression in 2026.3.7+).
-        // Fall back to lastAssistant.usage which is the pi-ai Usage object and always
-        // carries the per-call token counts directly from the provider response.
-        const lastAssistantUsage = (event.lastAssistant as { usage?: { input?: number; output?: number } } | undefined)?.usage;
-        const inputTokens = event.usage?.input ?? lastAssistantUsage?.input ?? 0;
-        const outputTokens = event.usage?.output ?? lastAssistantUsage?.output ?? 0;
+        let sessionBasedSuccess = false;
 
-        const span = createSpan(
-          ctx,
-          channelId,
-          `${event.provider}/${event.model}`,
-          "model",
-          startTime,
-          now,
-          {
+        try {
+          const { entries, userWrittenAt } = readCurrentTurnReactSequence(hookCtx);
+          const hasAssistantEntry = entries.some((e) => e.type === "assistant");
+
+          if (entries.length > 0 && hasAssistantEntry) {
+            const agentStart = ctx.agentStartTime || ctx.llmStartTime || lastLlmStartTime || now;
+            const modelCount = await buildReactSpans(ctx, channelId, entries, llmInput, agentStart, userWrittenAt);
+            if (modelCount > 0) {
+              sessionBasedSuccess = true;
+              ctx.sessionBasedSpansCreated = true;
+              if (config.debug) {
+                api.logger.info(`[CozeloopTrace] Session-based react spans created: modelCount=${modelCount}, traceId=${ctx.traceId}`);
+              }
+            }
+          }
+        } catch {
+          if (config.debug) {
+            api.logger.info(`[CozeloopTrace] Session-based span creation failed, falling back to hook data, traceId=${ctx.traceId}`);
+          }
+        }
+
+        if (!sessionBasedSuccess) {
+          if (ctx.pendingToolSpans) {
+            for (const pts of ctx.pendingToolSpans) {
+              const toolSpan = createSpan(
+                ctx,
+                channelId,
+                pts.toolName,
+                "tool",
+                pts.toolStartTime,
+                pts.toolEndTime,
+                pts.toolError ? { "error.msg": String(pts.toolError) } : {},
+                pts.toolInput,
+                pts.toolError ? { error: pts.toolError } : pts.toolOutput
+              );
+              toolSpan.spanId = pts.toolSpanId;
+              await exporter.export(toolSpan);
+              if (config.debug) {
+                api.logger.info(`[CozeloopTrace] Exported pending tool span (fallback): ${pts.toolName}, spanId=${pts.toolSpanId}, traceId=${ctx.traceId}`);
+              }
+            }
+          }
+
+          const lastAssistantUsage = (event.lastAssistant as { usage?: { input?: number; output?: number } } | undefined)?.usage;
+          const inputTokens = event.usage?.input ?? lastAssistantUsage?.input ?? 0;
+          const outputTokens = event.usage?.output ?? lastAssistantUsage?.output ?? 0;
+
+          const spanAttributes: Record<string, string | number | boolean> = {
             "gen_ai.provider.name": event.provider,
             "gen_ai.request.model": event.model,
             "gen_ai.usage.input_tokens": inputTokens,
             "gen_ai.usage.output_tokens": outputTokens,
-          },
-          llmInput,
-          { assistantTexts: event.assistantTexts?.slice(0, 3) }
-        );
+          };
 
-        if (llmSpanId) {
-          span.spanId = llmSpanId;
+          const finalOutput = formatAssistantOutput(
+            event.assistantTexts?.map((t: string) => ({ type: "text", text: t })) ?? [],
+            "stop"
+          );
+
+          const span = createSpan(
+            ctx,
+            channelId,
+            `${event.provider}/${event.model}`,
+            "model",
+            startTime,
+            now,
+            spanAttributes,
+            llmInput,
+            finalOutput
+          );
+
+          if (llmSpanId) {
+            span.spanId = llmSpanId;
+          }
+
+          if (config.debug) {
+            api.logger.info(`[CozeloopTrace] llm_output span created (fallback): spanId=${span.spanId}, parentSpanId=${span.parentSpanId}`);
+          }
+
+          await exporter.export(span);
+          if (config.debug) {
+            api.logger.info(`[CozeloopTrace] Exported LLM span (fallback): ${event.provider}/${event.model}, duration=${now - startTime}ms, traceId=${ctx.traceId}`);
+          }
         }
+
         ctx.llmStartTime = undefined;
         ctx.llmSpanId = undefined;
         ctx.llmInput = undefined;
+        ctx.reactCount = 0;
+        ctx.pendingToolSpans = undefined;
+        ctx.sessionBasedSpansCreated = undefined;
         lastLlmInput = undefined;
         lastLlmStartTime = undefined;
         lastLlmSpanId = undefined;
 
-        if (config.debug) {
-          api.logger.info(`[CozeloopTrace] llm_output span created: spanId=${span.spanId}, parentSpanId=${span.parentSpanId}`);
-        }
+        if (ctx.pendingCleanup) {
+          const cleanup = ctx.pendingCleanup;
+          ctx.pendingCleanup = undefined;
 
-        await exporter.export(span);
-        if (config.debug) {
-          api.logger.info(`[CozeloopTrace] Exported LLM span: ${event.provider}/${event.model}, duration=${now - startTime}ms, traceId=${ctx.traceId}`);
+          const savedCtx = cleanup.savedLastUserTraceContext;
+          if (savedCtx) {
+            savedCtx.lastOutput = undefined;
+          }
+          lastUserChannelId = undefined;
+          lastUserTraceContext = undefined;
+          if (cleanup.savedLastUserChannelId) {
+            endTurn(cleanup.savedLastUserChannelId);
+          }
+          if (cleanup.originalChannelId && cleanup.originalChannelId !== cleanup.savedLastUserChannelId) {
+            endTurn(cleanup.originalChannelId);
+          }
+
+          const rootCtx = savedCtx || ctx;
+          if (rootCtx.rootSpanStartTime) {
+            const rootSpanId = rootCtx.rootSpanId;
+            const rootSpanStartTime = rootCtx.rootSpanStartTime;
+            const userInput = rootCtx.userInput;
+            const traceId = rootCtx.traceId;
+            const agentChannelId = cleanup.agentChannelId;
+
+            setTimeout(async () => {
+              const agentCtx = getContextByChannel(agentChannelId);
+              const finalOutput = agentCtx?.lastOutput || rootCtx.lastOutput;
+              if (config.debug) {
+                api.logger.info(`[CozeloopTrace] Ending root span (delayed) with input=${userInput ? 'present' : 'missing'}, output=${finalOutput ? 'present' : 'missing'}`);
+              }
+              const endTime = Date.now();
+              exporter.endSpanById(
+                rootSpanId,
+                endTime,
+                {
+                  "request.duration_ms": endTime - rootSpanStartTime,
+                },
+                finalOutput,
+                userInput
+              );
+
+              if (config.debug) {
+                api.logger.info(`[CozeloopTrace] Ended root span: spanId=${rootSpanId}, duration=${endTime - rootSpanStartTime}ms, traceId=${traceId}`);
+              }
+
+              await exporter.flush();
+              exporter.endTrace();
+            }, 100);
+          } else {
+            await exporter.flush();
+            exporter.endTrace();
+          }
         }
       });
     }
@@ -615,6 +1181,8 @@ const cozeloopTracePlugin: OpenClawPlugin = {
           channelId: channelId,
         };
 
+        ctx.reactCount = (ctx.reactCount || 0) + 1;
+
         if (config.debug) {
           api.logger.info(`[CozeloopTrace] Tool call started: ${event.toolName}, spanId=${pendingToolCall.toolSpanId}, traceId=${ctx.traceId}`);
         }
@@ -634,28 +1202,27 @@ const cozeloopTracePlugin: OpenClawPlugin = {
           return;
         }
 
-        const { toolName, toolSpanId, toolStartTime, toolInput, traceContext, channelId } = pendingToolCall;
+        const { toolName, toolSpanId, toolStartTime, toolInput, traceContext } = pendingToolCall;
         pendingToolCall = undefined;
 
         const now = Date.now();
 
-        const span = createSpan(
-          traceContext,
-          channelId,
+        if (!traceContext.pendingToolSpans) {
+          traceContext.pendingToolSpans = [];
+        }
+
+        traceContext.pendingToolSpans.push({
           toolName,
-          "tool",
+          toolSpanId,
           toolStartTime,
-          now,
-          event.error ? { "error.msg": String(event.error) } : {},
+          toolEndTime: now,
           toolInput,
-          event.error ? { error: event.error } : event.result
-        );
+          toolOutput: event.error ? { error: event.error } : event.result,
+          toolError: event.error ? String(event.error) : undefined,
+        });
 
-        span.spanId = toolSpanId;
-
-        await exporter.export(span);
         if (config.debug) {
-          api.logger.info(`[CozeloopTrace] Exported tool span: ${toolName}, spanId=${toolSpanId}, duration=${now - toolStartTime}ms, traceId=${traceContext.traceId}`);
+          api.logger.info(`[CozeloopTrace] Collected pending tool span: ${toolName}, spanId=${toolSpanId}, duration=${now - toolStartTime}ms, traceId=${traceContext.traceId}`);
         }
       });
     }
@@ -733,57 +1300,12 @@ const cozeloopTracePlugin: OpenClawPlugin = {
           ctx.agentStartTime = undefined;
         }
 
-        const savedLastUserTraceContext = lastUserTraceContext;
-        if (savedLastUserTraceContext) {
-          savedLastUserTraceContext.lastOutput = undefined;
-        }
-        const savedLastUserChannelId = lastUserChannelId;
-        const originalChannelId = ctx.originalChannelId || savedLastUserChannelId || channelId;
-        lastUserChannelId = undefined;
-        lastUserTraceContext = undefined;
-        if (savedLastUserChannelId) {
-          endTurn(savedLastUserChannelId);
-        }
-        if (originalChannelId && originalChannelId !== savedLastUserChannelId) {
-          endTurn(originalChannelId);
-        }
-
-        const rootCtx = savedLastUserTraceContext || ctx;
-        const agentChannelId = channelId;
-        if (rootCtx.rootSpanStartTime) {
-          const rootSpanId = rootCtx.rootSpanId;
-          const rootSpanStartTime = rootCtx.rootSpanStartTime;
-          const userInput = rootCtx.userInput;
-          const traceId = rootCtx.traceId;
-
-          setTimeout(async () => {
-            const agentCtx = getContextByChannel(agentChannelId);
-            const finalOutput = agentCtx?.lastOutput || rootCtx.lastOutput;
-            if (config.debug) {
-              api.logger.info(`[CozeloopTrace] Ending root span (delayed) with input=${userInput ? 'present' : 'missing'}, output=${finalOutput ? 'present' : 'missing'}`);
-            }
-            const endTime = Date.now();
-            exporter.endSpanById(
-              rootSpanId,
-              endTime,
-              {
-                "request.duration_ms": endTime - rootSpanStartTime,
-              },
-              finalOutput,
-              userInput
-            );
-
-            if (config.debug) {
-              api.logger.info(`[CozeloopTrace] Ended root span: spanId=${rootSpanId}, duration=${endTime - rootSpanStartTime}ms, traceId=${traceId}`);
-            }
-
-            await exporter.flush();
-            exporter.endTrace();
-          }, 100);
-        } else {
-          await exporter.flush();
-          exporter.endTrace();
-        }
+        ctx.pendingCleanup = {
+          savedLastUserTraceContext: lastUserTraceContext,
+          savedLastUserChannelId: lastUserChannelId,
+          originalChannelId: ctx.originalChannelId || lastUserChannelId || channelId,
+          agentChannelId: channelId,
+        };
       });
     }
 
