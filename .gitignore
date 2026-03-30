@@ -60,3 +60,5 @@ java/integration/spring-ai-example/
 *.coda/
 
 *.DS_Store
+
+*node_modules/
