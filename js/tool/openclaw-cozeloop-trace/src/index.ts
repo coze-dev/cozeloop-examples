@@ -197,8 +197,8 @@ function convertAssistantContentForMessages(content: unknown): unknown[] {
 
 function convertToolResultsForMessages(
   toolResultEntries: ReactEntry[]
-): { role: string; content: unknown[] } {
-  const contentItems: unknown[] = [];
+): Array<{ role: string; content: string; tool_call_id: string }> {
+  const messages: Array<{ role: string; content: string; tool_call_id: string }> = [];
   for (const tr of toolResultEntries) {
     let textContent = "";
     if (Array.isArray(tr.content)) {
@@ -213,14 +213,13 @@ function convertToolResultsForMessages(
       textContent = JSON.stringify(tr.content);
     }
 
-    contentItems.push({
-      type: "tool_result",
-      tool_use_id: tr.toolCallId ?? "",
+    messages.push({
+      role: "tool",
       content: textContent,
-      is_error: tr.isError ?? false,
+      tool_call_id: tr.toolCallId ?? "",
     });
   }
-  return { role: "tool", content: contentItems };
+  return messages;
 }
 
 interface ReactEntry {
@@ -711,8 +710,8 @@ const cozeloopTracePlugin: OpenClawPlugin = {
             prevWrittenAt = nextWrittenAt;
           }
 
-          const toolResultMsg = convertToolResultsForMessages(consecutiveToolResults);
-          reactMessages.push(toolResultMsg);
+          const toolResultMsgs = convertToolResultsForMessages(consecutiveToolResults);
+          reactMessages.push(...toolResultMsgs);
           prevWrittenAt = entryWrittenAt;
         }
       }
