@@ -220,11 +220,11 @@ function convertToolResultsForMessages(
       is_error: tr.isError ?? false,
     });
   }
-  return { role: "user", content: contentItems };
+  return { role: "tool", content: contentItems };
 }
 
 interface ReactEntry {
-  type: "assistant" | "toolResult";
+  type: "assistant" | "toolResult" | "tool";
   content: unknown;
   provider?: string;
   model?: string;
@@ -577,7 +577,11 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         const inputObj = initialInput as Record<string, unknown>;
         if ("messages" in inputObj && Array.isArray(inputObj.messages)) {
           for (const msg of inputObj.messages as Array<Record<string, unknown>>) {
-            reactMessages.push({ role: String(msg.role || ""), content: safeClone(msg.content) });
+            const m: { role: string; content: unknown; tool_call_id?: string } = { role: String(msg.role || ""), content: safeClone(msg.content) };
+            if (msg.tool_call_id) {
+              m.tool_call_id = String(msg.tool_call_id);
+            }
+            reactMessages.push(m);
           }
         }
       }
@@ -963,6 +967,13 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         };
         for (const message of messages as unknown as Array<Record<string, unknown>>) {
           convertToolCallDeepInPlace(message);
+          if ("toolCallId" in message) {
+            message.tool_call_id = message.toolCallId;
+            delete message.toolCallId;
+          }
+          if (message.role === "toolResult") {
+            message.role = "tool";
+          }
         }
 
         ctx.llmInput = {
