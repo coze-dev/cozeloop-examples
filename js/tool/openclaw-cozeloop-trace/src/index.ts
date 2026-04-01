@@ -118,13 +118,6 @@ function formatAssistantOutput(content: unknown, stopReason?: string): Record<st
     const itemType = (item as Record<string, unknown>).type;
 
     if (itemType === "toolCall") {
-      const toolCallItem: Record<string, unknown> = {
-        type: "tool_use",
-        id: item.id ?? "",
-        name: item.name ?? "",
-        input: item.arguments ?? item.input ?? {},
-      };
-      messageContent.push(toolCallItem);
       toolCalls.push({
         function: {
           arguments: typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments ?? item.input ?? {}),
