@@ -21,6 +21,10 @@ import type {
 import { CozeloopExporter } from "./cozeloop-exporter.js";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const { version: PLUGIN_VERSION } = require("../package.json") as { version: string };
 import { homedir } from "node:os";
 
 function generateId(length = 16): string {
@@ -412,7 +416,7 @@ let pendingToolCall: PendingToolCall | undefined;
 const cozeloopTracePlugin: OpenClawPlugin = {
   id: "openclaw-cozeloop-trace",
   name: "OpenClaw CozeLoop Trace",
-  version: "0.1.0",
+  version: PLUGIN_VERSION,
   description: "Report OpenClaw execution traces to CozeLoop via OpenTelemetry",
 
   activate(api: OpenClawPluginApi) {

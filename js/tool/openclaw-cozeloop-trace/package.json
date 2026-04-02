@@ -1,6 +1,6 @@
 {
   "name": "@cozeloop/openclaw-cozeloop-trace",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "OpenClaw Plugin for reporting traces to CozeLoop via OpenTelemetry",
   "type": "module",
   "main": "dist/index.js",

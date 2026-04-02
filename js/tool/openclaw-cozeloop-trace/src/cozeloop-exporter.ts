@@ -6,6 +6,10 @@ import { Resource } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_INSTANCE_ID } from "@opentelemetry/semantic-conventions";
 import { hostname } from "os";
 import { basename } from "path";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const { version: PLUGIN_VERSION } = require("../package.json") as { version: string };
 
 export class CozeloopExporter {
   private config: CozeloopTraceConfig;
@@ -67,7 +71,7 @@ export class CozeloopExporter {
     }));
     this.provider.register();
 
-    this.tracer = trace.getTracer("openclaw-cozeloop-trace", "0.1.0");
+    this.tracer = trace.getTracer("openclaw-cozeloop-trace", PLUGIN_VERSION);
     this.initialized = true;
 
     this.api.logger.info(`[CozeloopTrace] Exporter initialized with Authorization, workspaceId=${workspaceId}`);
