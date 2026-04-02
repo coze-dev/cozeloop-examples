@@ -1,6 +1,6 @@
 {
   "name": "@cozeloop/openclaw-cozeloop-trace-onboard-cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "One-click installer for openclaw-cozeloop-trace plugin",
   "type": "module",
   "main": "dist/index.js",

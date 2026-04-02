@@ -71,12 +71,37 @@ function normalizeAuthorization(token: string): string {
   return `Bearer ${cleaned}`;
 }
 
+function maskSecret(value: string): string {
+  if (value.length <= 4) return "****";
+  return value.slice(0, 2) + "****" + value.slice(-2);
+}
+
 async function collectPluginConfig(): Promise<{ authorization: string; workspaceId: string }> {
   const config = await readConfig();
   const existingEntry = config.plugins?.entries?.[PLUGIN_NAME];
   const existingConfig = existingEntry?.config || {};
   const existingAuthorization = typeof existingConfig.authorization === "string" ? existingConfig.authorization : "";
   const existingWorkspaceId = typeof existingConfig.workspaceId === "string" ? existingConfig.workspaceId : "";
+
+  // If a complete config already exists, ask the user whether to reuse it
+  if (existingAuthorization && existingWorkspaceId) {
+    console.log("\n检测到 openclaw.json 中已有 openclaw-cozeloop-trace 配置:");
+    console.log(`  服务访问令牌: ${maskSecret(existingAuthorization)}`);
+    console.log(`  空间id:       ${existingWorkspaceId}\n`);
+
+    const { useExisting } = await inquirer.prompt([
+      {
+        name: "useExisting",
+        type: "confirm",
+        message: "是否使用已有配置?",
+        default: true,
+      },
+    ]);
+
+    if (useExisting) {
+      return { authorization: existingAuthorization, workspaceId: existingWorkspaceId };
+    }
+  }
 
   const answers = await inquirer.prompt([
     {
