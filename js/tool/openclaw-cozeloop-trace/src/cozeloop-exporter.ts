@@ -1,6 +1,6 @@
 import type { SpanData, CozeloopTraceConfig, OpenClawPluginApi } from "./types.js";
 import { trace, context, SpanKind, SpanStatusCode, Context, Span as ApiSpan } from "@opentelemetry/api";
-import { BasicTracerProvider, BatchSpanProcessor, Span } from "@opentelemetry/sdk-trace-base";
+import { BasicTracerProvider, BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { Resource } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_INSTANCE_ID } from "@opentelemetry/semantic-conventions";
@@ -19,10 +19,9 @@ export class CozeloopExporter {
   private initialized: boolean = false;
   private initPromise: Promise<void> | null = null;
 
-  private currentRootSpan: ApiSpan | null = null;
-  private currentRootContext: Context | null = null;
-  private currentAgentSpan: ApiSpan | null = null;
-  private currentAgentContext: Context | null = null;
+  // Per-trace context: keyed by the plugin-level rootSpanId so that
+  // concurrent or overlapping traces never stomp on each other.
+  private traceContexts: Map<string, { rootSpan: ApiSpan; rootContext: Context; agentSpan?: ApiSpan; agentContext?: Context }> = new Map();
   private openSpans: Map<string, ApiSpan> = new Map();
 
   constructor(api: OpenClawPluginApi, config: CozeloopTraceConfig) {
@@ -93,18 +92,30 @@ export class CozeloopExporter {
     const isRoot = !spanData.parentSpanId;
     const isAgent = spanData.type === "agent";
 
-    let parentContext: Context;
+    // Resolve parent context:
+    // - Root spans: no parent, use active context.
+    // - Agent/child spans: look up traceContexts by parentSpanId (which is
+    //   always the rootSpanId set by index.ts createSpan / ensureRootSpan).
+    const traceCtx = spanData.parentSpanId
+      ? this.traceContexts.get(spanData.parentSpanId)
+      : undefined;
 
+    if (!isRoot && !traceCtx && this.config.debug) {
+      const keys = Array.from(this.traceContexts.keys());
+      this.api.logger.info(
+        `[CozeloopTrace] doStartSpan() cannot find parent context: ` +
+        `parentSpanId=${spanData.parentSpanId}, spanName=${spanData.name}, type=${spanData.type}, ` +
+        `traceContextKeys=[${keys.join(",")}]`
+      );
+    }
+
+    let parentContext: Context;
     if (isRoot) {
-      this.currentRootSpan = null;
-      this.currentRootContext = null;
-      this.currentAgentSpan = null;
-      this.currentAgentContext = null;
       parentContext = context.active();
     } else if (isAgent) {
-      parentContext = this.currentRootContext || context.active();
+      parentContext = traceCtx?.rootContext || context.active();
     } else {
-      parentContext = this.currentAgentContext || this.currentRootContext || context.active();
+      parentContext = traceCtx?.agentContext || traceCtx?.rootContext || context.active();
     }
 
     const runtimeTag: Record<string, string> = {
@@ -131,8 +142,8 @@ export class CozeloopExporter {
     );
 
     if (isRoot) {
-      this.currentRootSpan = span;
-      this.currentRootContext = trace.setSpan(context.active(), span);
+      const rootContext = trace.setSpan(context.active(), span);
+      this.traceContexts.set(spanId, { rootSpan: span, rootContext });
 
       if (this.config.debug) {
         const sc = span.spanContext();
@@ -140,9 +151,9 @@ export class CozeloopExporter {
       }
     }
 
-    if (isAgent) {
-      this.currentAgentSpan = span;
-      this.currentAgentContext = trace.setSpan(this.currentRootContext || context.active(), span);
+    if (isAgent && traceCtx) {
+      traceCtx.agentSpan = span;
+      traceCtx.agentContext = trace.setSpan(traceCtx.rootContext, span);
 
       if (this.config.debug) {
         const sc = span.spanContext();
@@ -207,16 +218,32 @@ export class CozeloopExporter {
     const isRoot = !spanData.parentSpanId;
     const isAgent = spanData.type === "agent";
 
-    let parentContext: Context;
+    const traceCtx = spanData.parentSpanId
+      ? this.traceContexts.get(spanData.parentSpanId)
+      : undefined;
 
+    if (!isRoot && !traceCtx) {
+      // Only warn for span types that are expected to be inside a trace
+      // (agent, model, tool). message/session/gateway spans may fire before
+      // the root span is created and that is normal.
+      const criticalTypes = new Set(["agent", "model", "tool"]);
+      if (criticalTypes.has(spanData.type) && this.config.debug) {
+        const keys = Array.from(this.traceContexts.keys());
+        this.api.logger.info(
+          `[CozeloopTrace] export() cannot find parent context: ` +
+          `parentSpanId=${spanData.parentSpanId}, spanName=${spanData.name}, type=${spanData.type}, ` +
+          `traceContextKeys=[${keys.join(",")}]`
+        );
+      }
+    }
+
+    let parentContext: Context;
     if (isRoot) {
-      this.currentRootSpan = null;
-      this.currentRootContext = null;
       parentContext = context.active();
     } else if (isAgent) {
-      parentContext = this.currentRootContext || context.active();
+      parentContext = traceCtx?.rootContext || context.active();
     } else {
-      parentContext = this.currentAgentContext || this.currentRootContext || context.active();
+      parentContext = traceCtx?.agentContext || traceCtx?.rootContext || context.active();
     }
 
     const runtimeTag: Record<string, string> = {
@@ -243,8 +270,9 @@ export class CozeloopExporter {
     );
 
     if (isRoot) {
-      this.currentRootSpan = span;
-      this.currentRootContext = trace.setSpan(context.active(), span);
+      const rootContext = trace.setSpan(context.active(), span);
+      const spanId = spanData.spanId || "export-root";
+      this.traceContexts.set(spanId, { rootSpan: span, rootContext });
 
       if (this.config.debug) {
         const sc = span.spanContext();
@@ -288,14 +316,19 @@ export class CozeloopExporter {
     }
   }
 
-  endTrace(): void {
-    this.currentRootSpan = null;
-    this.currentRootContext = null;
-    this.currentAgentSpan = null;
-    this.currentAgentContext = null;
-    this.openSpans.clear();
+  hasTraceContext(rootSpanId: string): boolean {
+    return this.traceContexts.has(rootSpanId);
+  }
+
+  endTrace(rootSpanId?: string): void {
+    if (rootSpanId) {
+      this.traceContexts.delete(rootSpanId);
+    } else {
+      this.traceContexts.clear();
+      this.openSpans.clear();
+    }
     if (this.config.debug) {
-      this.api.logger.info(`[CozeloopTrace] Trace ended, context cleared`);
+      this.api.logger.info(`[CozeloopTrace] Trace ended, context cleared${rootSpanId ? ` for rootSpanId=${rootSpanId}` : ' (all)'}`);
     }
   }
 

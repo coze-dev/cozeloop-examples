@@ -392,16 +392,23 @@ interface TraceContext {
     toolError?: string;
   }>;
   sessionBasedSpansCreated?: boolean;
-  pendingCleanup?: {
-    savedLastUserTraceContext: TraceContext | undefined;
-    savedLastUserChannelId: string | undefined;
-    originalChannelId: string;
-    agentChannelId: string;
-  };
+  /** Number of session entries already exported by buildReactSpans so we skip
+   *  them on the next llm_output call to avoid duplicate spans. */
+  sessionBasedExportedCount?: number;
 }
 
 let lastUserChannelId: string | undefined;
 let lastUserTraceContext: TraceContext | undefined;
+
+// Active agent context: set in before_agent_start, cleared in agent_end.
+// All hooks between these two (llm_input, llm_output, tool calls, messages)
+// use this to ensure every span lands in the same Trace.
+let activeAgentCtx: TraceContext | undefined;
+let activeAgentChannelId: string | undefined;
+
+// Latest user input captured from message_received, independent of any ctx.
+// Used by ensureRootSpan as a reliable fallback for the root span's input.
+let lastUserInput: unknown;
 
 interface PendingToolCall {
   toolName: string;
@@ -529,6 +536,20 @@ const cozeloopTracePlugin: OpenClawPlugin = {
       return { ctx: activeCtx, channelId, isNew };
     };
 
+    // Resolve context for hooks that fire between before_agent_start and
+    // agent_end.  When an agent is active, always return that agent's context
+    // so every span ends up in the same Trace regardless of channelId drift.
+    const resolveActiveContext = (rawChannelId: string, runId?: string, hookName?: string): { ctx: TraceContext; channelId: string } => {
+      if (activeAgentCtx) {
+        if (config.debug) {
+          api.logger.info(`[CozeloopTrace] Using activeAgentCtx for ${hookName}: traceId=${activeAgentCtx.traceId}, rootSpanId=${activeAgentCtx.rootSpanId}`);
+        }
+        return { ctx: activeAgentCtx, channelId: activeAgentChannelId || rawChannelId };
+      }
+      const { ctx, channelId } = getOrCreateContext(rawChannelId, runId, hookName);
+      return { ctx, channelId };
+    };
+
     const createSpan = (
       ctx: TraceContext,
       channelId: string,
@@ -566,8 +587,10 @@ const cozeloopTracePlugin: OpenClawPlugin = {
       entries: ReactEntry[],
       initialInput: unknown,
       agentStartTime: number,
-      userWrittenAt?: number
+      userWrittenAt?: number,
+      skipCount?: number
     ): Promise<number> => {
+      const entriesToSkip = skipCount || 0;
       const reactMessages: Array<{ role: string; content: unknown }> = [];
       if (initialInput && typeof initialInput === "object") {
         const inputObj = initialInput as Record<string, unknown>;
@@ -589,35 +612,40 @@ const cozeloopTracePlugin: OpenClawPlugin = {
       for (let i = 0; i < entries.length; i++) {
         const entry = entries[i];
         const entryWrittenAt = entry.writtenAt || prevWrittenAt;
+        // Whether this entry was already exported in a previous llm_output call.
+        const alreadyExported = i < entriesToSkip;
 
         if (entry.type === "assistant") {
           reactRound++;
-          modelSpanCount++;
 
-          const provider = entry.provider || ctx.lastModelProvider || "unknown";
-          const model = entry.model || ctx.lastModelId || "unknown";
-          const spanStartTime = prevWrittenAt;
-          const spanEndTime = entryWrittenAt;
+          if (!alreadyExported) {
+            modelSpanCount++;
 
-          const modelSpan = createSpan(
-            ctx,
-            channelId,
-            `${provider}/${model}`,
-            "model",
-            spanStartTime,
-            spanEndTime,
-            {
-              "gen_ai.provider.name": provider,
-              "gen_ai.request.model": model,
-              "gen_ai.usage.input_tokens": entry.usage?.input ?? 0,
-              "gen_ai.usage.output_tokens": entry.usage?.output ?? 0,
-              "react_round": reactRound,
-            },
-            { messages: reactMessages.map((msg) => safeClone(msg)) },
-            formatAssistantOutput(entry.content, entry.stopReason)
-          );
+            const provider = entry.provider || ctx.lastModelProvider || "unknown";
+            const model = entry.model || ctx.lastModelId || "unknown";
+            const spanStartTime = prevWrittenAt;
+            const spanEndTime = entryWrittenAt;
 
-          await exporter.export(modelSpan);
+            const modelSpan = createSpan(
+              ctx,
+              channelId,
+              `${provider}/${model}`,
+              "model",
+              spanStartTime,
+              spanEndTime,
+              {
+                "gen_ai.provider.name": provider,
+                "gen_ai.request.model": model,
+                "gen_ai.usage.input_tokens": entry.usage?.input ?? 0,
+                "gen_ai.usage.output_tokens": entry.usage?.output ?? 0,
+                "react_round": reactRound,
+              },
+              { messages: reactMessages.map((msg) => safeClone(msg)) },
+              formatAssistantOutput(entry.content, entry.stopReason)
+            );
+
+            await exporter.export(modelSpan);
+          }
 
           reactMessages.push({
             role: "assistant",
@@ -625,59 +653,18 @@ const cozeloopTracePlugin: OpenClawPlugin = {
           });
           prevWrittenAt = entryWrittenAt;
         } else if (entry.type === "toolResult") {
-          const toolSpanStartTime = prevWrittenAt;
-          const toolSpanEndTime = entryWrittenAt;
+          if (!alreadyExported) {
+            const toolSpanStartTime = prevWrittenAt;
+            const toolSpanEndTime = entryWrittenAt;
 
-          let toolInput: unknown = undefined;
-          for (let j = i - 1; j >= 0; j--) {
-            if (entries[j].type === "assistant") {
-              const assistantContent = entries[j].content;
-              if (Array.isArray(assistantContent)) {
-                for (const item of assistantContent as Array<Record<string, unknown>>) {
-                  if (item?.type === "toolCall" && item.id === entry.toolCallId) {
-                    toolInput = { name: item.name, arguments: item.arguments ?? item.input };
-                    break;
-                  }
-                }
-              }
-              break;
-            }
-          }
-
-          const toolAttrs: Record<string, string | number | boolean> = {};
-          if (entry.isError) {
-            toolAttrs["error.msg"] = "tool returned error";
-          }
-
-          const toolSpan = createSpan(
-            ctx,
-            channelId,
-            entry.toolName || "unknown_tool",
-            "tool",
-            toolSpanStartTime,
-            toolSpanEndTime,
-            toolAttrs,
-            toolInput,
-            entry.content
-          );
-
-          await exporter.export(toolSpan);
-
-          const consecutiveToolResults: ReactEntry[] = [entry];
-          while (i + 1 < entries.length && entries[i + 1].type === "toolResult") {
-            i++;
-            const nextTr = entries[i];
-            consecutiveToolResults.push(nextTr);
-
-            const nextWrittenAt = nextTr.writtenAt || prevWrittenAt;
-            let nextToolInput: unknown = undefined;
+            let toolInput: unknown = undefined;
             for (let j = i - 1; j >= 0; j--) {
               if (entries[j].type === "assistant") {
-                const ac = entries[j].content;
-                if (Array.isArray(ac)) {
-                  for (const item of ac as Array<Record<string, unknown>>) {
-                    if (item?.type === "toolCall" && item.id === nextTr.toolCallId) {
-                      nextToolInput = { name: item.name, arguments: item.arguments ?? item.input };
+                const assistantContent = entries[j].content;
+                if (Array.isArray(assistantContent)) {
+                  for (const item of assistantContent as Array<Record<string, unknown>>) {
+                    if (item?.type === "toolCall" && item.id === entry.toolCallId) {
+                      toolInput = { name: item.name, arguments: item.arguments ?? item.input };
                       break;
                     }
                   }
@@ -686,30 +673,80 @@ const cozeloopTracePlugin: OpenClawPlugin = {
               }
             }
 
-            const nextToolAttrs: Record<string, string | number | boolean> = {};
-            if (nextTr.isError) {
-              nextToolAttrs["error.msg"] = "tool returned error";
+            const toolAttrs: Record<string, string | number | boolean> = {};
+            if (entry.isError) {
+              toolAttrs["error.msg"] = "tool returned error";
             }
 
-            const nextToolSpan = createSpan(
+            const toolSpan = createSpan(
               ctx,
               channelId,
-              nextTr.toolName || "unknown_tool",
+              entry.toolName || "unknown_tool",
               "tool",
-              prevWrittenAt,
-              nextWrittenAt,
-              nextToolAttrs,
-              nextToolInput,
-              nextTr.content
+              toolSpanStartTime,
+              toolSpanEndTime,
+              toolAttrs,
+              toolInput,
+              entry.content
             );
 
-            await exporter.export(nextToolSpan);
-            prevWrittenAt = nextWrittenAt;
+            await exporter.export(toolSpan);
+          }
+
+          const consecutiveToolResults: ReactEntry[] = [entry];
+          let lastToolWrittenAt = entryWrittenAt;
+          while (i + 1 < entries.length && entries[i + 1].type === "toolResult") {
+            i++;
+            const nextTr = entries[i];
+            const nextAlreadyExported = i < entriesToSkip;
+            consecutiveToolResults.push(nextTr);
+            const nextWrittenAt = nextTr.writtenAt || lastToolWrittenAt;
+            lastToolWrittenAt = nextWrittenAt;
+
+            if (!nextAlreadyExported) {
+              let nextToolInput: unknown = undefined;
+              for (let j = i - 1; j >= 0; j--) {
+                if (entries[j].type === "assistant") {
+                  const ac = entries[j].content;
+                  if (Array.isArray(ac)) {
+                    for (const item of ac as Array<Record<string, unknown>>) {
+                      if (item?.type === "toolCall" && item.id === nextTr.toolCallId) {
+                        nextToolInput = { name: item.name, arguments: item.arguments ?? item.input };
+                        break;
+                      }
+                    }
+                  }
+                  break;
+                }
+              }
+
+              const nextToolAttrs: Record<string, string | number | boolean> = {};
+              if (nextTr.isError) {
+                nextToolAttrs["error.msg"] = "tool returned error";
+              }
+
+              const nextToolSpan = createSpan(
+                ctx,
+                channelId,
+                nextTr.toolName || "unknown_tool",
+                "tool",
+                prevWrittenAt,
+                nextWrittenAt,
+                nextToolAttrs,
+                nextToolInput,
+                nextTr.content
+              );
+
+              await exporter.export(nextToolSpan);
+              prevWrittenAt = nextWrittenAt;
+            }
           }
 
           const toolResultMsgs = convertToolResultsForMessages(consecutiveToolResults);
           reactMessages.push(...toolResultMsgs);
-          prevWrittenAt = entryWrittenAt;
+          // Use the last tool's timestamp so the next model span starts after
+          // all tools, not just after the first one.
+          prevWrittenAt = lastToolWrittenAt;
         }
       }
 
@@ -747,54 +784,9 @@ const cozeloopTracePlugin: OpenClawPlugin = {
       api.on<SessionStartEvent>("session_start", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx, event.sessionId);
         if (config.debug) {
-          api.logger.info(`[CozeloopTrace] session_start hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}`);
+          api.logger.info(`[CozeloopTrace] session_start: ${rawChannelId}`);
         }
-        const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "session_start");
-        const now = Date.now();
-        const span = createSpan(
-          ctx,
-          channelId,
-          "session_start",
-          "entry",
-          now,
-          now,
-          { "event.type": "session_start" }
-        );
-        await exporter.export(span);
-        if (config.debug) {
-          api.logger.info(`[CozeloopTrace] Exported session_start: ${channelId}, traceId=${ctx.traceId}`);
-        }
-      });
-    }
-
-    if (shouldHookEnabled("session_end")) {
-      api.on<SessionEndEvent>("session_end", async (event, hookCtx: PluginHookContext) => {
-        const rawChannelId = resolveChannelId(hookCtx, event.sessionId);
-        if (config.debug) {
-          api.logger.info(`[CozeloopTrace] session_end hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}`);
-        }
-        const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "session_end");
-        const now = Date.now();
-        const span = createSpan(
-          ctx,
-          channelId,
-          "session_end",
-          "entry",
-          now,
-          now,
-          {
-            "session.duration_ms": event.duration || 0,
-            "session.message_count": event.messageCount || 0,
-            "session.total_tokens": event.totalTokens || 0,
-          },
-          undefined,
-          { messageCount: event.messageCount, totalTokens: event.totalTokens }
-        );
-        await exporter.export(span);
-        endTurn(channelId);
-        if (config.debug) {
-          api.logger.info(`[CozeloopTrace] Exported session_end: ${channelId}`);
-        }
+        getOrCreateContext(rawChannelId, undefined, "session_start");
       });
     }
 
@@ -804,8 +796,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         if (config.debug) {
           api.logger.info(`[CozeloopTrace] message_received hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}, event.from=${event.from}`);
         }
-        const { ctx, channelId, isNew } = getOrCreateContext(rawChannelId, undefined, "message_received");
-        const now = Date.now();
+        const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "message_received");
         let role = event.role;
         if (!role && event.from) {
           role = "user";
@@ -818,57 +809,20 @@ const cozeloopTracePlugin: OpenClawPlugin = {
             lastUserChannelId = channelId;
             lastUserTraceContext = ctx;
             ctx.userInput = event.content;
+            lastUserInput = event.content;
             if (config.debug) {
               api.logger.info(`[CozeloopTrace] Saved user context: channelId=${channelId}, traceId=${ctx.traceId}`);
             }
           }
 
-          if (!ctx.rootSpanStartTime) {
-            ctx.rootSpanStartTime = now;
-            if (!ctx.userInput) {
-              ctx.userInput = event.content;
-            }
-            const rootSpanData: SpanData = {
-              name: "openclaw_request",
-              type: "entry",
-              startTime: now,
-              attributes: {
-                "session.id": channelId,
-                "run.id": ctx.runId,
-                "turn.id": ctx.turnId,
-              },
-              input: ctx.userInput,
-              traceId: ctx.traceId,
-              spanId: ctx.rootSpanId,
-            };
-            await exporter.startSpan(rootSpanData, ctx.rootSpanId);
-            if (config.debug) {
-              api.logger.info(`[CozeloopTrace] Started root span: traceId=${ctx.traceId}, spanId=${ctx.rootSpanId}`);
-            }
+          if (!ctx.userInput) {
+            ctx.userInput = event.content;
           }
 
           if (!lastUserTraceContext) {
             lastUserTraceContext = ctx;
             lastUserChannelId = channelId;
           }
-        }
-
-        const span = createSpan(
-          ctx,
-          channelId,
-          role === "user" ? "user_message" : "message_received",
-          "message",
-          now,
-          now,
-          {
-            "message.role": role || "unknown",
-            "message.from": event.from || "unknown",
-          },
-          event.content
-        );
-        await exporter.export(span);
-        if (config.debug) {
-          api.logger.info(`[CozeloopTrace] Exported message_received: ${channelId}, role=${role}, traceId=${ctx.traceId}`);
         }
       });
     }
@@ -882,7 +836,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
           }
         } else {
           const rawChannelId = resolveChannelId(hookCtx, event.to);
-          const { ctx } = getOrCreateContext(rawChannelId, undefined, "message_sending");
+          const { ctx } = resolveActiveContext(rawChannelId, undefined, "message_sending");
           ctx.lastOutput = event.content;
           if (config.debug) {
             api.logger.info(`[CozeloopTrace] Captured output (fallback) for root span: traceId=${ctx.traceId}`);
@@ -901,7 +855,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
             }
           } else {
             const rawChannelId = resolveChannelId(hookCtx, event.to);
-            const { ctx } = getOrCreateContext(rawChannelId, undefined, "message_sent");
+            const { ctx } = resolveActiveContext(rawChannelId, undefined, "message_sent");
             ctx.lastOutput = event.content;
             if (config.debug) {
               api.logger.info(`[CozeloopTrace] Captured output from message_sent (fallback): traceId=${ctx.traceId}`);
@@ -921,12 +875,28 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         if (config.debug) {
           api.logger.info(`[CozeloopTrace] llm_input hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}, event.runId=${event.runId}`);
         }
-        const { ctx } = getOrCreateContext(rawChannelId, event.runId, "llm_input");
+        const { ctx } = resolveActiveContext(rawChannelId, event.runId, "llm_input");
+
         ctx.llmStartTime = Date.now();
         ctx.llmSpanId = generateId(16);
         ctx.lastModelProvider = event.provider;
         ctx.lastModelId = event.model;
         ctx.reactCount = 0;
+
+        // If userInput was never set (no message_received hook fired), capture
+        // the first llm prompt as the user input for the root span.
+        if (!ctx.userInput && event.prompt) {
+          ctx.userInput = event.prompt;
+          if (!lastUserInput) {
+            lastUserInput = event.prompt;
+          }
+        }
+
+        // Fallback: ensure root + agent spans exist in case before_agent_start
+        // was not fired (older OpenClaw versions or resumed sessions).
+        const channelIdForSpans = activeAgentChannelId || rawChannelId;
+        await ensureRootSpan(ctx, channelIdForSpans);
+        await ensureAgentSpan(ctx, channelIdForSpans);
 
         const messages: Array<{ role: string; content: unknown }> = [];
         if (event.systemPrompt) {
@@ -995,7 +965,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
 
           api.logger.info(`[CozeloopTrace] llm_output hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}, event.runId=${event.runId}`);
         }
-        const { ctx, channelId } = getOrCreateContext(rawChannelId, event.runId, "llm_output");
+        const { ctx, channelId } = resolveActiveContext(rawChannelId, event.runId, "llm_output");
         const now = Date.now();
         const startTime = ctx.llmStartTime || lastLlmStartTime || now;
 
@@ -1025,12 +995,16 @@ const cozeloopTracePlugin: OpenClawPlugin = {
 
           if (entries.length > 0 && hasAssistantEntry) {
             const agentStart = ctx.agentStartTime || ctx.llmStartTime || lastLlmStartTime || now;
-            const modelCount = await buildReactSpans(ctx, channelId, entries, llmInput, agentStart, userWrittenAt);
+            const skipCount = ctx.sessionBasedExportedCount || 0;
+            const modelCount = await buildReactSpans(ctx, channelId, entries, llmInput, agentStart, userWrittenAt, skipCount);
             if (modelCount > 0) {
               sessionBasedSuccess = true;
               ctx.sessionBasedSpansCreated = true;
+              // Remember how many entries we exported so the next llm_output
+              // call skips them and avoids duplicate spans.
+              ctx.sessionBasedExportedCount = entries.length;
               if (config.debug) {
-                api.logger.info(`[CozeloopTrace] Session-based react spans created: modelCount=${modelCount}, traceId=${ctx.traceId}`);
+                api.logger.info(`[CozeloopTrace] Session-based react spans created: modelCount=${modelCount}, totalEntries=${entries.length}, skipped=${skipCount}, traceId=${ctx.traceId}`);
               }
             }
           }
@@ -1113,61 +1087,6 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         lastLlmInput = undefined;
         lastLlmStartTime = undefined;
         lastLlmSpanId = undefined;
-
-        if (ctx.pendingCleanup) {
-          const cleanup = ctx.pendingCleanup;
-          ctx.pendingCleanup = undefined;
-
-          const savedCtx = cleanup.savedLastUserTraceContext;
-          if (savedCtx) {
-            savedCtx.lastOutput = undefined;
-          }
-          lastUserChannelId = undefined;
-          lastUserTraceContext = undefined;
-          if (cleanup.savedLastUserChannelId) {
-            endTurn(cleanup.savedLastUserChannelId);
-          }
-          if (cleanup.originalChannelId && cleanup.originalChannelId !== cleanup.savedLastUserChannelId) {
-            endTurn(cleanup.originalChannelId);
-          }
-
-          const rootCtx = savedCtx || ctx;
-          if (rootCtx.rootSpanStartTime) {
-            const rootSpanId = rootCtx.rootSpanId;
-            const rootSpanStartTime = rootCtx.rootSpanStartTime;
-            const userInput = rootCtx.userInput;
-            const traceId = rootCtx.traceId;
-            const agentChannelId = cleanup.agentChannelId;
-
-            setTimeout(async () => {
-              const agentCtx = getContextByChannel(agentChannelId);
-              const finalOutput = agentCtx?.lastOutput || rootCtx.lastOutput;
-              if (config.debug) {
-                api.logger.info(`[CozeloopTrace] Ending root span (delayed) with input=${userInput ? 'present' : 'missing'}, output=${finalOutput ? 'present' : 'missing'}`);
-              }
-              const endTime = Date.now();
-              exporter.endSpanById(
-                rootSpanId,
-                endTime,
-                {
-                  "request.duration_ms": endTime - rootSpanStartTime,
-                },
-                finalOutput,
-                userInput
-              );
-
-              if (config.debug) {
-                api.logger.info(`[CozeloopTrace] Ended root span: spanId=${rootSpanId}, duration=${endTime - rootSpanStartTime}ms, traceId=${traceId}`);
-              }
-
-              await exporter.flush();
-              exporter.endTrace();
-            }, 100);
-          } else {
-            await exporter.flush();
-            exporter.endTrace();
-          }
-        }
       });
     }
 
@@ -1177,7 +1096,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         if (config.debug) {
           api.logger.info(`[CozeloopTrace] before_tool_call hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}, toolName=${event.toolName}`);
         }
-        const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "before_tool_call");
+        const { ctx, channelId } = resolveActiveContext(rawChannelId, undefined, "before_tool_call");
 
         pendingToolCall = {
           toolName: event.toolName,
@@ -1234,6 +1153,175 @@ const cozeloopTracePlugin: OpenClawPlugin = {
       });
     }
 
+    // Helper: finalize a trace — end agent span (if open), end root span, flush,
+    // and clean up all state.  Called from agent_end (normal path) and
+    // session_end (fallback for old OpenClaw versions that don't emit agent_end).
+    let traceFinalized = false;
+    const finalizeTrace = (
+      ctx: TraceContext,
+      channelId: string,
+      agentEndAttrs?: Record<string, string | number | boolean>,
+      agentOutput?: unknown,
+    ): void => {
+      if (traceFinalized) return;
+      traceFinalized = true;
+
+      const now = Date.now();
+
+      // End agent span if still open.
+      if (ctx.agentSpanId) {
+        exporter.endSpanById(
+          ctx.agentSpanId,
+          now,
+          agentEndAttrs || {},
+          agentOutput
+        );
+        if (config.debug) {
+          api.logger.info(`[CozeloopTrace] Ended agent span: spanId=${ctx.agentSpanId}, traceId=${ctx.traceId}`);
+        }
+        ctx.agentSpanId = undefined;
+        ctx.agentStartTime = undefined;
+      }
+
+      const rootSpanId = ctx.rootSpanId;
+      const rootSpanStartTime = ctx.rootSpanStartTime;
+      const userInput = ctx.userInput || (lastUserTraceContext ? lastUserTraceContext.userInput : undefined) || lastUserInput;
+      const traceId = ctx.traceId;
+      const hasRootSpan = !!rootSpanStartTime;
+      const savedLastUserChannelId = lastUserChannelId;
+      const originalChannelId = ctx.originalChannelId || channelId;
+
+      setTimeout(async () => {
+        if (hasRootSpan) {
+          const finalOutput = ctx.lastOutput || (lastUserTraceContext ? lastUserTraceContext.lastOutput : undefined);
+          if (config.debug) {
+            api.logger.info(`[CozeloopTrace] Ending root span with input=${userInput ? 'present' : 'missing'}, output=${finalOutput ? 'present' : 'missing'}`);
+          }
+          const endTime = Date.now();
+          exporter.endSpanById(
+            rootSpanId,
+            endTime,
+            {
+              "request.duration_ms": endTime - (rootSpanStartTime || 0),
+            },
+            finalOutput,
+            userInput
+          );
+
+          if (config.debug) {
+            api.logger.info(`[CozeloopTrace] Ended root span: spanId=${rootSpanId}, duration=${endTime - (rootSpanStartTime || 0)}ms, traceId=${traceId}`);
+          }
+        }
+
+        await exporter.flush();
+        exporter.endTrace(rootSpanId);
+
+        if (activeAgentCtx === ctx) {
+          activeAgentCtx = undefined;
+          activeAgentChannelId = undefined;
+        }
+        if (savedLastUserChannelId) {
+          endTurn(savedLastUserChannelId);
+        }
+        if (originalChannelId && originalChannelId !== savedLastUserChannelId) {
+          endTurn(originalChannelId);
+        }
+        lastUserChannelId = undefined;
+        lastUserTraceContext = undefined;
+        lastUserInput = undefined;
+        traceFinalized = false;
+      }, 200);
+    };
+
+    // Helper: ensure root openclaw_request span is started for a given context.
+    // Must be called before creating the agent span so that the exporter's
+    // currentRootContext is set and the agent span becomes a proper child.
+    const ensureRootSpan = async (ctx: TraceContext, channelId: string): Promise<void> => {
+      // Check both: rootSpanStartTime indicates we created a root span before,
+      // but the exporter's traceContexts may have been cleaned up by a previous
+      // turn's deferred endTrace(). If the exporter no longer has the entry we
+      // must recreate the root span.
+      if (ctx.rootSpanStartTime && exporter.hasTraceContext(ctx.rootSpanId)) {
+        return;
+      }
+
+      const now = Date.now();
+      ctx.rootSpanStartTime = now;
+      // Generate a fresh rootSpanId when the old one was cleaned up, so we
+      // don't collide with the previous turn's IDs.
+      const isRebuild = !exporter.hasTraceContext(ctx.rootSpanId);
+      if (isRebuild) {
+        ctx.rootSpanId = generateId(16);
+        // This is a new turn reusing a stale ctx — clear the previous turn's
+        // userInput, exported count, and agent span so we don't carry over
+        // stale state. The agent span must be recreated under the new root.
+        ctx.userInput = undefined;
+        ctx.sessionBasedExportedCount = undefined;
+        ctx.agentSpanId = undefined;
+        ctx.agentStartTime = undefined;
+      }
+
+      // Resolve user input: prefer ctx.userInput set by this turn's
+      // message_received, fall back to lastUserTraceContext, then lastUserInput.
+      if (!ctx.userInput) {
+        ctx.userInput = lastUserTraceContext?.userInput || lastUserInput;
+      }
+
+      const rootSpanData: SpanData = {
+        name: "openclaw_request",
+        type: "entry",
+        startTime: now,
+        attributes: {
+          "session.id": channelId,
+          "run.id": ctx.runId,
+          "turn.id": ctx.turnId,
+        },
+        input: ctx.userInput,
+        traceId: ctx.traceId,
+        spanId: ctx.rootSpanId,
+      };
+      await exporter.startSpan(rootSpanData, ctx.rootSpanId);
+      if (config.debug) {
+        api.logger.info(`[CozeloopTrace] ensureRootSpan: created root span, rootSpanId=${ctx.rootSpanId}, traceContextsHas=${exporter.hasTraceContext(ctx.rootSpanId)}`);
+      }
+    };
+
+    // Helper: ensure the agent span exists for a given context.
+    // Safe to call multiple times — only creates the span once.
+    const ensureAgentSpan = async (ctx: TraceContext, channelId: string, agentId?: string): Promise<void> => {
+      if (ctx.agentSpanId) return;
+
+      const effectiveAgentId = agentId || "main";
+      const now = Date.now();
+      ctx.agentStartTime = now;
+      ctx.agentSpanId = generateId(16);
+
+      const spanData: SpanData = {
+        name: effectiveAgentId,
+        type: "agent",
+        startTime: now,
+        attributes: {
+          "agent.id": effectiveAgentId,
+          "session.id": channelId,
+          "run.id": ctx.runId,
+          "turn.id": ctx.turnId,
+        },
+        traceId: ctx.traceId,
+        spanId: ctx.agentSpanId,
+        parentSpanId: ctx.rootSpanId,
+      };
+
+      await exporter.startSpan(spanData, ctx.agentSpanId);
+
+      // Set active agent context so all subsequent hooks use the same Trace.
+      activeAgentCtx = ctx;
+      activeAgentChannelId = channelId;
+
+      if (config.debug) {
+        api.logger.info(`[CozeloopTrace] ensureAgentSpan: created agent span, agentId=${effectiveAgentId}, spanId=${ctx.agentSpanId}, traceId=${ctx.traceId}`);
+      }
+    };
+
     if (shouldHookEnabled("before_agent_start")) {
       api.on<BeforeAgentStartEvent>("before_agent_start", async (event, hookCtx: PluginHookContext) => {
         const rawChannelId = resolveChannelId(hookCtx);
@@ -1243,37 +1331,8 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         }
         const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "before_agent_start");
 
-        if (ctx.agentSpanId) {
-          if (config.debug) {
-            api.logger.info(`[CozeloopTrace] Agent span already started, skipping: ${agentId}, traceId=${ctx.traceId}`);
-          }
-          return;
-        }
-
-        const now = Date.now();
-        ctx.agentStartTime = now;
-        ctx.agentSpanId = generateId(16);
-
-        const spanData: SpanData = {
-          name: agentId,
-          type: "agent",
-          startTime: now,
-          attributes: {
-            "agent.id": agentId,
-            "session.id": channelId,
-            "run.id": ctx.runId,
-            "turn.id": ctx.turnId,
-          },
-          traceId: ctx.traceId,
-          spanId: ctx.agentSpanId,
-          parentSpanId: ctx.rootSpanId,
-        };
-
-        await exporter.startSpan(spanData, ctx.agentSpanId);
-
-        if (config.debug) {
-          api.logger.info(`[CozeloopTrace] Started agent span: ${agentId}, spanId=${ctx.agentSpanId}, traceId=${ctx.traceId}`);
-        }
+        await ensureRootSpan(ctx, channelId);
+        await ensureAgentSpan(ctx, channelId, agentId);
       });
     }
 
@@ -1283,36 +1342,44 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         if (config.debug) {
           api.logger.info(`[CozeloopTrace] agent_end hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}`);
         }
-        const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "agent_end");
-        const now = Date.now();
+        // Use activeAgentCtx if available, otherwise fall back to resolution.
+        const ctx = activeAgentCtx || getOrCreateContext(rawChannelId, undefined, "agent_end").ctx;
+        const channelId = activeAgentChannelId || rawChannelId;
 
-        if (ctx.agentSpanId) {
-          exporter.endSpanById(
-            ctx.agentSpanId,
-            now,
-            {
-              "agent.duration_ms": event.durationMs || 0,
-              "agent.message_count": event.messageCount || 0,
-              "agent.tool_call_count": event.toolCallCount || 0,
-              "agent.total_tokens": event.usage?.total || 0,
-            },
-            { usage: event.usage, cost: event.cost }
-          );
+        finalizeTrace(
+          ctx,
+          channelId,
+          {
+            "agent.duration_ms": event.durationMs || 0,
+            "agent.message_count": event.messageCount || 0,
+            "agent.tool_call_count": event.toolCallCount || 0,
+            "agent.total_tokens": event.usage?.total || 0,
+          },
+          { usage: event.usage, cost: event.cost }
+        );
+      });
+    }
 
-          if (config.debug) {
-            api.logger.info(`[CozeloopTrace] Ended agent span: spanId=${ctx.agentSpanId}, duration=${event.durationMs}ms, traceId=${ctx.traceId}`);
-          }
-
-          ctx.agentSpanId = undefined;
-          ctx.agentStartTime = undefined;
+    // Fallback: on session_end, if agent_end was never fired (old OpenClaw
+    // versions), finalize the trace here so that agent + root spans get ended
+    // and exported.
+    if (shouldHookEnabled("session_end")) {
+      api.on<SessionEndEvent>("session_end", async (event, hookCtx: PluginHookContext) => {
+        const rawChannelId = resolveChannelId(hookCtx, event.sessionId);
+        if (config.debug) {
+          api.logger.info(`[CozeloopTrace] session_end: ${rawChannelId}`);
         }
-
-        ctx.pendingCleanup = {
-          savedLastUserTraceContext: lastUserTraceContext,
-          savedLastUserChannelId: lastUserChannelId,
-          originalChannelId: ctx.originalChannelId || lastUserChannelId || channelId,
-          agentChannelId: channelId,
-        };
+        const ctx = activeAgentCtx || lastUserTraceContext;
+        if (ctx && ctx.rootSpanStartTime) {
+          const channelId = activeAgentChannelId || lastUserChannelId || rawChannelId;
+          if (config.debug) {
+            api.logger.info(`[CozeloopTrace] session_end: finalizing trace as fallback, traceId=${ctx.traceId}`);
+          }
+          finalizeTrace(ctx, channelId);
+        } else {
+          const { channelId } = getOrCreateContext(rawChannelId, undefined, "session_end");
+          endTurn(channelId);
+        }
       });
     }
 
