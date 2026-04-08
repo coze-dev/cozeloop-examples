@@ -243,7 +243,7 @@ function parseEntryWrittenAt(entry: Record<string, unknown>): number | undefined
   return undefined;
 }
 
-function readCurrentTurnReactSequence(hookCtx: PluginHookContext): { entries: ReactEntry[]; userWrittenAt?: number } {
+function readCurrentTurnReactSequence(hookCtx: PluginHookContext): { entries: ReactEntry[]; userWrittenAt?: number; userContent?: unknown } {
   try {
     const targetFile = resolveSessionFile(hookCtx);
     if (!targetFile) return { entries: [] };
@@ -253,6 +253,7 @@ function readCurrentTurnReactSequence(hookCtx: PluginHookContext): { entries: Re
 
     let lastUserIdx = -1;
     let userWrittenAt: number | undefined;
+    let userContent: unknown;
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i].trim();
       if (!line) continue;
@@ -263,6 +264,7 @@ function readCurrentTurnReactSequence(hookCtx: PluginHookContext): { entries: Re
         if (msg?.role === "user") {
           lastUserIdx = i;
           userWrittenAt = parseEntryWrittenAt(entry);
+          userContent = msg.content;
           break;
         }
       } catch {
@@ -311,10 +313,74 @@ function readCurrentTurnReactSequence(hookCtx: PluginHookContext): { entries: Re
       }
     }
 
-    return { entries, userWrittenAt };
+    return { entries, userWrittenAt, userContent };
   } catch {
     return { entries: [] };
   }
+}
+
+/**
+ * Check if a content value contains multimodal parts (non-text types like image).
+ */
+function hasMultimodalParts(content: unknown): boolean {
+  if (!Array.isArray(content)) return false;
+  return (content as Array<Record<string, unknown>>).some(
+    (item) => item && typeof item === "object" && item.type && item.type !== "text"
+  );
+}
+
+/**
+ * Convert session-file content parts to the expected span input format.
+ *
+ * Session file stores images as:
+ *   { type: "image", data: "<base64>", mimeType: "image/jpeg" }
+ *
+ * Span input expects:
+ *   { type: "image_url", image_url: { url: "data:image/jpeg;base64,<base64>", name: "", detail: "" } }
+ *
+ * If the total size of all image data exceeds 3 MB, images are replaced with
+ * a placeholder text part to avoid oversized span input.
+ *
+ * Text parts are kept as-is.
+ */
+const IMAGE_SIZE_LIMIT = 1 * 1024 * 1024; // 1 MB
+
+function convertContentPartsForSpan(content: unknown): unknown {
+  if (!Array.isArray(content)) return content;
+
+  const parts = content as Array<Record<string, unknown>>;
+
+  // Calculate total byte size of all image data (base64 length × 3/4 ≈ raw bytes)
+  let totalImageBytes = 0;
+  for (const part of parts) {
+    if (part?.type === "image" && typeof part.data === "string") {
+      totalImageBytes += Math.ceil((part.data as string).length * 3 / 4);
+    }
+  }
+
+  const exceedsLimit = totalImageBytes > IMAGE_SIZE_LIMIT;
+
+  return parts.map((part) => {
+    if (!part || typeof part !== "object") return part;
+    if (part.type === "image" && typeof part.data === "string") {
+      if (exceedsLimit) {
+        return {
+          type: "text",
+          text: "[image data removed due to large size - already processed by model]",
+        };
+      }
+      const mimeType = (part.mimeType as string) || "image/png";
+      return {
+        type: "image_url",
+        image_url: {
+          url: `data:${mimeType};base64,${part.data}`,
+          name: "",
+          detail: "",
+        },
+      };
+    }
+    return part;
+  });
 }
 
 function normalizeChannelId(input: string, defaultPlatform = "system"): string {
@@ -588,7 +654,8 @@ const cozeloopTracePlugin: OpenClawPlugin = {
       initialInput: unknown,
       agentStartTime: number,
       userWrittenAt?: number,
-      skipCount?: number
+      skipCount?: number,
+      sessionUserContent?: unknown
     ): Promise<number> => {
       const entriesToSkip = skipCount || 0;
       const reactMessages: Array<{ role: string; content: unknown }> = [];
@@ -602,6 +669,54 @@ const cozeloopTracePlugin: OpenClawPlugin = {
             }
             reactMessages.push(m);
           }
+        }
+      }
+
+      // Enrich the last user message with multimodal content from the session
+      // file.  At llm_output time the session file is guaranteed to contain the
+      // full user message including image parts.
+      if (sessionUserContent && hasMultimodalParts(sessionUserContent)) {
+        const converted = convertContentPartsForSpan(safeClone(sessionUserContent));
+        if (config.debug) {
+          // Log size check details
+          const rawParts = sessionUserContent as Array<Record<string, unknown>>;
+          let totalBytes = 0;
+          let imageCount = 0;
+          for (const p of rawParts) {
+            if (p?.type === "image" && typeof p.data === "string") {
+              imageCount++;
+              totalBytes += Math.ceil((p.data as string).length * 3 / 4);
+            }
+          }
+          const convertedParts = converted as Array<Record<string, unknown>>;
+          const convertedTypes = convertedParts.map(p => String(p?.type ?? 'unknown'));
+          api.logger.info(`[CozeloopTrace] Multimodal enrichment: imageCount=${imageCount}, totalImageBytes=${totalBytes}, limit=${IMAGE_SIZE_LIMIT}, exceedsLimit=${totalBytes > IMAGE_SIZE_LIMIT}, convertedTypes=[${convertedTypes.join(',')}]`);
+        }
+        for (let mi = reactMessages.length - 1; mi >= 0; mi--) {
+          if (reactMessages[mi].role === "user") {
+            reactMessages[mi].content = converted;
+            if (config.debug) {
+              const parts = converted as Array<Record<string, unknown>>;
+              api.logger.info(`[CozeloopTrace] Enriched last user message in reactMessages with multimodal content: ${parts.length} parts, types=[${parts.map(p => p.type).join(',')}]`);
+            }
+            break;
+          }
+        }
+
+        // Also update ctx.userInput so the root span carries multimodal content
+        if (!hasMultimodalParts(ctx.userInput)) {
+          ctx.userInput = converted;
+          if (!lastUserInput || !hasMultimodalParts(lastUserInput)) {
+            lastUserInput = converted;
+          }
+        }
+      } else if (config.debug) {
+        const isArray = Array.isArray(sessionUserContent);
+        if (isArray) {
+          const items = sessionUserContent as Array<Record<string, unknown>>;
+          api.logger.info(`[CozeloopTrace] Multimodal enrichment skipped: sessionUserContent=array[${items.length}] types=[${items.map(i => String(i?.type ?? typeof i)).join(',')}], hasMultimodal=false`);
+        } else {
+          api.logger.info(`[CozeloopTrace] Multimodal enrichment skipped: sessionUserContent=${sessionUserContent === undefined ? 'undefined' : typeof sessionUserContent}`);
         }
       }
 
@@ -990,13 +1105,13 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         let sessionBasedSuccess = false;
 
         try {
-          const { entries, userWrittenAt } = readCurrentTurnReactSequence(hookCtx);
+          const { entries, userWrittenAt, userContent } = readCurrentTurnReactSequence(hookCtx);
           const hasAssistantEntry = entries.some((e) => e.type === "assistant");
 
           if (entries.length > 0 && hasAssistantEntry) {
             const agentStart = ctx.agentStartTime || ctx.llmStartTime || lastLlmStartTime || now;
             const skipCount = ctx.sessionBasedExportedCount || 0;
-            const modelCount = await buildReactSpans(ctx, channelId, entries, llmInput, agentStart, userWrittenAt, skipCount);
+            const modelCount = await buildReactSpans(ctx, channelId, entries, llmInput, agentStart, userWrittenAt, skipCount, userContent);
             if (modelCount > 0) {
               sessionBasedSuccess = true;
               ctx.sessionBasedSpansCreated = true;
