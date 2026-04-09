@@ -199,9 +199,12 @@ def send_turns_to_cozeloop(turns: List[Dict[str, Any]], session_id: str, history
         with client.start_span(name="claude_code_request", span_type="main") as root_span:
             root_span.set_runtime(Runtime(library="claude-code"))
             root_span.set_tags({
-                "session_id": session_id,
+                "thread_id": session_id,
                 "total_turns": len(turns),
                 "source": "claude_code"
+            })
+            root_span.set_baggage({
+                "thread_id": session_id,
             })
 
             # Build cumulative history from previously processed turns
@@ -239,7 +242,7 @@ def send_turns_to_cozeloop(turns: List[Dict[str, Any]], session_id: str, history
                 with client.start_span(name=f"claude_code_turn_{i}", span_type="main") as turn_span:
                     turn_span.set_runtime(Runtime(library="claude-code"))
                     turn_span.set_tags({
-                        "session_id": session_id,
+                        "thread_id": session_id,
                         "turn_index": i,
                         "source": "claude_code",
                         "project": os.environ.get("CLAUDE_PROJECT_NAME", "unknown") # Example of custom tag

@@ -388,6 +388,22 @@ function normalizeChannelId(input: string, defaultPlatform = "system"): string {
     return `${defaultPlatform}/unknown`;
   }
   if (input.includes("/")) {
+    // 已标准化的两段格式（无冒号），直接返回
+    if (!input.includes(":")) {
+      return input;
+    }
+    // 复合格式：尝试提取飞书用户标识
+    const feishuMatch = input.match(/(ou|oc|og)_[a-zA-Z0-9]+/);
+    if (feishuMatch) {
+      return `feishu/${feishuMatch[0]}`;
+    }
+    // agent/xxx:yyy → agent/xxx
+    const slashIdx = input.indexOf("/");
+    const afterSlash = input.substring(slashIdx + 1);
+    const colonIdx = afterSlash.indexOf(":");
+    if (colonIdx > 0) {
+      return `${input.substring(0, slashIdx)}/${afterSlash.substring(0, colonIdx)}`;
+    }
     return input;
   }
   const prefix = input.split(/[_:]/)[0];
@@ -461,10 +477,12 @@ interface TraceContext {
   /** Number of session entries already exported by buildReactSpans so we skip
    *  them on the next llm_output call to avoid duplicate spans. */
   sessionBasedExportedCount?: number;
+  openclawSessionId?: string;
 }
 
 let lastUserChannelId: string | undefined;
 let lastUserTraceContext: TraceContext | undefined;
+let lastOpenclawSessionId: string | undefined;
 
 // Active agent context: set in before_agent_start, cleared in agent_end.
 // All hooks between these two (llm_input, llm_output, tool calls, messages)
@@ -485,6 +503,12 @@ interface PendingToolCall {
   channelId: string;
 }
 let pendingToolCall: PendingToolCall | undefined;
+
+function resolveOpenclawSessionId(hookCtx: PluginHookContext, eventSessionId?: string): string | undefined {
+  const raw = (hookCtx.sessionId as string)?.trim() || eventSessionId?.trim();
+  if (!raw) return undefined;
+  return raw;
+}
 
 const cozeloopTracePlugin: OpenClawPlugin = {
   id: "openclaw-cozeloop-trace",
@@ -538,7 +562,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
       return ctx?.originalChannelId || ctx?.channelId;
     };
 
-    const startTurn = (runId: string, channelId: string, originalChannelId?: string): TraceContext => {
+    const startTurn = (runId: string, channelId: string, originalChannelId?: string, openclawSessionId?: string): TraceContext => {
       const traceId = generateId(32);
       const ctx: TraceContext = {
         traceId,
@@ -547,6 +571,7 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         turnId: runId,
         channelId,
         originalChannelId: originalChannelId || channelId,
+        openclawSessionId,
       };
       contextByChannelId.set(channelId, ctx);
       contextByRunId.set(runId, ctx);
@@ -635,9 +660,10 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         endTime,
         attributes: {
           ...attributes,
-          "session.id": channelId,
+          "session.id": ctx.openclawSessionId || channelId,
           "run.id": ctx.runId,
           "turn.id": ctx.turnId,
+          "openclaw.channel_id": channelId,
         },
         input,
         output,
@@ -901,7 +927,13 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         if (config.debug) {
           api.logger.info(`[CozeloopTrace] session_start: ${rawChannelId}`);
         }
-        getOrCreateContext(rawChannelId, undefined, "session_start");
+        const { ctx } = getOrCreateContext(rawChannelId, undefined, "session_start");
+        const ocSessionId = resolveOpenclawSessionId(hookCtx, event.sessionId);
+        if (ocSessionId) {
+          ctx.openclawSessionId = ocSessionId;
+          lastOpenclawSessionId = ocSessionId;
+        }
+        ctx.openclawSessionId = ctx.openclawSessionId || lastOpenclawSessionId;
       });
     }
 
@@ -912,6 +944,14 @@ const cozeloopTracePlugin: OpenClawPlugin = {
           api.logger.info(`[CozeloopTrace] message_received hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}, event.from=${event.from}`);
         }
         const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "message_received");
+
+        const ocSessionId = resolveOpenclawSessionId(hookCtx);
+        if (ocSessionId) {
+          ctx.openclawSessionId = ocSessionId;
+          lastOpenclawSessionId = ocSessionId;
+        }
+        ctx.openclawSessionId = ctx.openclawSessionId || lastOpenclawSessionId;
+
         let role = event.role;
         if (!role && event.from) {
           role = "user";
@@ -991,6 +1031,13 @@ const cozeloopTracePlugin: OpenClawPlugin = {
           api.logger.info(`[CozeloopTrace] llm_input hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId })}, event.runId=${event.runId}`);
         }
         const { ctx } = resolveActiveContext(rawChannelId, event.runId, "llm_input");
+
+        const ocSessionId = resolveOpenclawSessionId(hookCtx);
+        if (ocSessionId) {
+          ctx.openclawSessionId = ocSessionId;
+          lastOpenclawSessionId = ocSessionId;
+        }
+        ctx.openclawSessionId = ctx.openclawSessionId || lastOpenclawSessionId;
 
         ctx.llmStartTime = Date.now();
         ctx.llmSpanId = generateId(16);
@@ -1387,9 +1434,10 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         type: "entry",
         startTime: now,
         attributes: {
-          "session.id": channelId,
+          "session.id": ctx.openclawSessionId || channelId,
           "run.id": ctx.runId,
           "turn.id": ctx.turnId,
+          "openclaw.channel_id": channelId,
         },
         input: ctx.userInput,
         traceId: ctx.traceId,
@@ -1417,9 +1465,10 @@ const cozeloopTracePlugin: OpenClawPlugin = {
         startTime: now,
         attributes: {
           "agent.id": effectiveAgentId,
-          "session.id": channelId,
+          "session.id": ctx.openclawSessionId || channelId,
           "run.id": ctx.runId,
           "turn.id": ctx.turnId,
+          "openclaw.channel_id": channelId,
         },
         traceId: ctx.traceId,
         spanId: ctx.agentSpanId,
@@ -1445,6 +1494,13 @@ const cozeloopTracePlugin: OpenClawPlugin = {
           api.logger.info(`[CozeloopTrace] before_agent_start hookCtx: ${JSON.stringify({ channelId: hookCtx.channelId, sessionKey: hookCtx.sessionKey, conversationId: hookCtx.conversationId, agentId: hookCtx.agentId })}, event.agentId=${event.agentId}`);
         }
         const { ctx, channelId } = getOrCreateContext(rawChannelId, undefined, "before_agent_start");
+
+        const ocSessionId = resolveOpenclawSessionId(hookCtx);
+        if (ocSessionId) {
+          ctx.openclawSessionId = ocSessionId;
+          lastOpenclawSessionId = ocSessionId;
+        }
+        ctx.openclawSessionId = ctx.openclawSessionId || lastOpenclawSessionId;
 
         await ensureRootSpan(ctx, channelId);
         await ensureAgentSpan(ctx, channelId, agentId);
