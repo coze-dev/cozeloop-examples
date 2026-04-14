@@ -68,9 +68,14 @@ export class CozeloopExporter {
       maxExportBatchSize: this.config.batchSize || 10,
       scheduledDelayMillis: this.config.batchInterval || 5000,
     }));
-    this.provider.register();
 
-    this.tracer = trace.getTracer("openclaw-cozeloop-trace", PLUGIN_VERSION);
+    // Do NOT call this.provider.register() — it sets the global TracerProvider
+    // singleton, so if the plugin is activated more than once (e.g. gateway +
+    // plugins subsystem), the second instance would silently get a NOOP tracer
+    // while its hooks override those of the first instance, causing all trace
+    // operations to become no-ops.  Instead, obtain the tracer directly from
+    // our own provider instance.
+    this.tracer = this.provider.getTracer("openclaw-cozeloop-trace", PLUGIN_VERSION);
     this.initialized = true;
 
     this.api.logger.info(`[CozeloopTrace] Exporter initialized with Authorization, workspaceId=${workspaceId}`);
@@ -211,6 +216,7 @@ export class CozeloopExporter {
   }
 
   async export(spanData: SpanData): Promise<void> {
+    try {
     await this.ensureInitialized();
     if (!this.tracer) return;
 
@@ -297,6 +303,9 @@ export class CozeloopExporter {
         `[CozeloopTrace] Created span: name=${spanData.name}, type=${spanData.type}, ` +
         `traceId=${spanContext.traceId}, spanId=${spanContext.spanId}, isRoot=${isRoot}`
       );
+    }
+    } catch (err) {
+      this.api.logger.error(`[CozeloopTrace] Failed to export span: ${err}`);
     }
   }
 

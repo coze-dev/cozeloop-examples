@@ -62,3 +62,5 @@ java/integration/spring-ai-example/
 *.DS_Store
 
 *node_modules/
+
+*__pycache__/
