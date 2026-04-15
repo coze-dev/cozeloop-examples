@@ -24,9 +24,55 @@ export class CozeloopExporter {
   private traceContexts: Map<string, { rootSpan: ApiSpan; rootContext: Context; agentSpan?: ApiSpan; agentContext?: Context }> = new Map();
   private openSpans: Map<string, ApiSpan> = new Map();
 
+  // Extra attributes derived from environment variables, applied to every span.
+  private envAttributes: Record<string, string> = {};
+
   constructor(api: OpenClawPluginApi, config: CozeloopTraceConfig) {
     this.api = api;
     this.config = config;
+    this.envAttributes = this.parseEnvAttributes();
+  }
+
+  private parseEnvAttributes(): Record<string, string> {
+    const attrs: Record<string, string> = {};
+
+    // COZE_PROJECT_ID -> project_id
+    const projectId = process.env.COZE_PROJECT_ID?.trim();
+    if (projectId) {
+      attrs["project_id"] = projectId;
+    }
+
+    // COZELOOP_UDF_TAGS -> udf_ prefixed keys
+    const tagsRaw = process.env.COZELOOP_UDF_TAGS?.trim();
+    if (tagsRaw) {
+      const pairs = tagsRaw.split(",");
+      for (const pair of pairs) {
+        const eqIdx = pair.indexOf("=");
+        if (eqIdx < 0) {
+          this.api.logger.error(`[CozeloopTrace] Invalid COZELOOP_UDF_TAGS entry (missing '='): "${pair}"`);
+          continue;
+        }
+        const key = pair.substring(0, eqIdx);
+        const value = pair.substring(eqIdx + 1);
+
+        // Validate: key and value must not contain '=' or ','
+        if (key.includes("=") || key.includes(",")) {
+          this.api.logger.error(`[CozeloopTrace] Invalid COZELOOP_UDF_TAGS key contains '=' or ',': "${key}"`);
+          continue;
+        }
+        if (value.includes("=") || value.includes(",")) {
+          this.api.logger.error(`[CozeloopTrace] Invalid COZELOOP_UDF_TAGS value contains '=' or ',': "${value}"`);
+          continue;
+        }
+        if (!key) {
+          this.api.logger.error(`[CozeloopTrace] Invalid COZELOOP_UDF_TAGS entry (empty key): "${pair}"`);
+          continue;
+        }
+        attrs[`udf_${key}`] = value;
+      }
+    }
+
+    return attrs;
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -140,6 +186,7 @@ export class CozeloopExporter {
         attributes: {
           "cozeloop.span_type": spanData.type,
           "cozeloop.system_tag_runtime": systemTagRuntime,
+          ...this.envAttributes,
           ...this.flattenAttributes(spanData.attributes),
         },
       },
@@ -269,6 +316,7 @@ export class CozeloopExporter {
         attributes: {
           "cozeloop.span_type": spanData.type,
           "cozeloop.system_tag_runtime": systemTagRuntime,
+          ...this.envAttributes,
           ...this.flattenAttributes(spanData.attributes),
         },
       },
